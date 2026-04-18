@@ -164,6 +164,26 @@ project-root/
 
 ---
 
+## ⚠️ 已知限制
+
+* 对硬件资源（尤其是GPU）有一定要求
+* 不同平台上传接口可能存在波动
+* 数字人口广播效果依赖上游模型质量
+
+---
+
+## 🤝 致谢
+
+本项目基于以下优秀项目与工具构建，特此开源表示感谢：
+
+* [耳语](https://github.com/openai/whisper)
+* [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)
+* [HeyGem](https://github.com/GuijiAI/HeyGem.ai)
+* [社交自动上传](https://github.com/dreammis/social-auto-upload)
+* FFmpeg
+
+---
+
 ## 📄 使用限制与声明
 
 * 本项目 **仅用于个人学习、研究和技术交流**
