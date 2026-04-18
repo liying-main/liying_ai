@@ -1,0 +1,52 @@
+{
+  "name": "liying-ai",
+  "version": "3.0.1",
+  "description": "厉影AI - AI视频处理工具",
+  "main": "./out/main/index.js",
+  "author": "",
+  "homepage": "",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "clean:renderer-assets": "cmd /c \"for %d in (bgms fonts videos voices title-styles) do if exist out\\renderer\\assets\\%d rd /s /q out\\renderer\\assets\\%d && echo Removed %d\" && echo Cleaned redundant renderer media assets",
+    "prepare-channel": "node scripts/prepare-channel.mjs",
+    "build:win": "npm run build && npm run clean:renderer-assets && electron-builder --win",
+    "build:agent": "node scripts/prepare-channel.mjs %npm_config_channel% && npm run build && npm run clean:renderer-assets && electron-builder --win --config electron-builder.generated.yml",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.2",
+    "@electron-toolkit/utils": "^4.0.0",
+    "@napi-rs/canvas": "^0.1.97",
+    "cors": "^2.8.6",
+    "electron-updater": "^6.1.7",
+    "express": "^5.2.1",
+    "opencc-js": "^1.0.5",
+    "playwright": "^1.58.2",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.19",
+    "electron": "^38.0.0",
+    "electron-builder": "^25.0.0",
+    "electron-vite": "^3.0.0",
+    "eslint": "^9.0.0",
+    "postcss": "^8.4.38",
+    "prettier": "^3.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0"
+  }
+}

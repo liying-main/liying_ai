@@ -1,0 +1,255 @@
+/* ============================================================
+   厉影AI 主题系统
+   ============================================================ */
+
+/* 午夜金 (默认) */
+:root[data-theme="midnight-gold"] {
+  --qt-bg: #08091a;
+  --qt-bg-soft: rgba(14, 16, 38, 0.65);
+  --qt-surface: rgba(16, 19, 45, 0.82);
+  --qt-surface-strong: rgba(18, 21, 50, 0.94);
+  --qt-surface-solid: #141836;
+  --qt-card-bg: #12153a;
+  --qt-panel: rgba(16, 19, 45, 0.92);
+  --qt-sidebar-bg: rgba(10, 11, 28, 0.96);
+  
+  --qt-primary: #d4a035;
+  --qt-primary-2: #f0c050;
+  --qt-primary-3: #fcd34d;
+  --qt-primary-soft: rgba(212, 160, 53, 0.14);
+  --qt-btn-text: #422006;
+  
+  --qt-text: rgba(245, 243, 255, 0.96);
+  --qt-text-2: #b0aed0;
+  --qt-text-3: rgba(120, 118, 155, 1);
+  --qt-text-muted: rgba(90, 88, 125, 1);
+  
+  --qt-border: rgba(212, 160, 53, 0.14);
+  --qt-border-strong: rgba(212, 160, 53, 0.28);
+  
+  --qt-input-bg: rgba(8, 9, 26, 0.50);
+  --qt-input-bg-focus: rgba(8, 9, 26, 0.78);
+  --qt-input-fg: rgba(245, 243, 255, 0.93);
+  --qt-input-placeholder: rgba(140, 138, 175, 0.55);
+  
+  --qt-shadow-md: 0 4px 24px rgba(0, 0, 0, 0.30);
+  --qt-shadow-lg: 0 10px 48px rgba(0, 0, 0, 0.42);
+}
+
+/* 深色青绿 */
+:root[data-theme="dark-teal"] {
+  --qt-bg: #0a1628;
+  --qt-bg-soft: #0f1f35;
+  --qt-surface: rgba(15, 31, 53, 0.85);
+  --qt-surface-strong: rgba(20, 40, 65, 0.92);
+  --qt-surface-solid: #142840;
+  --qt-card-bg: #1a2332;
+  --qt-panel: rgba(15, 31, 53, 0.92);
+  --qt-sidebar-bg: rgba(10, 22, 40, 0.96);
+  
+  --qt-primary: #14b8a6;
+  --qt-primary-2: #2dd4bf;
+  --qt-primary-3: #5eead4;
+  --qt-primary-soft: rgba(20, 184, 166, 0.15);
+  --qt-btn-text: #042f2e;
+  
+  --qt-text: #f8fafc;
+  --qt-text-2: #94a3b8;
+  --qt-text-3: #78909c;
+  --qt-text-muted: #64748b;
+  
+  --qt-border: rgba(148, 163, 184, 0.12);
+  --qt-border-strong: rgba(148, 163, 184, 0.25);
+  
+  --qt-input-bg: rgba(15, 23, 42, 0.65);
+  --qt-input-bg-focus: rgba(15, 23, 42, 0.85);
+  --qt-input-fg: #f8fafc;
+  --qt-input-placeholder: #64748b;
+  
+  --qt-shadow-md: 0 4px 20px rgba(0, 0, 0, 0.25);
+  --qt-shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* 深色靛蓝 */
+:root[data-theme="dark-indigo"] {
+  --qt-bg: #0f0a28;
+  --qt-bg-soft: #1a1040;
+  --qt-surface: rgba(26, 16, 64, 0.85);
+  --qt-surface-strong: rgba(35, 25, 80, 0.92);
+  --qt-surface-solid: #231950;
+  --qt-card-bg: #1e1445;
+  --qt-panel: rgba(26, 16, 64, 0.92);
+  --qt-sidebar-bg: rgba(15, 10, 40, 0.96);
+  
+  --qt-primary: #818cf8;
+  --qt-primary-2: #a5b4fc;
+  --qt-primary-3: #c7d2fe;
+  --qt-primary-soft: rgba(129, 140, 248, 0.15);
+  --qt-btn-text: #1e1b4b;
+  
+  --qt-text: #f8fafc;
+  --qt-text-2: #a5b4fc;
+  --qt-text-3: #8b8cc8;
+  --qt-text-muted: #6366f1;
+  
+  --qt-border: rgba(165, 180, 252, 0.12);
+  --qt-border-strong: rgba(165, 180, 252, 0.25);
+  
+  --qt-input-bg: rgba(15, 10, 40, 0.65);
+  --qt-input-bg-focus: rgba(15, 10, 40, 0.85);
+  --qt-input-fg: #f8fafc;
+  --qt-input-placeholder: #6366f1;
+  
+  --qt-shadow-md: 0 4px 20px rgba(99, 102, 241, 0.15);
+  --qt-shadow-lg: 0 10px 40px rgba(99, 102, 241, 0.2);
+}
+
+/* 浅色青绿 */
+:root[data-theme="light-teal"] {
+  --qt-bg: #f0fdfa;
+  --qt-bg-soft: #ccfbf1;
+  --qt-surface: rgba(255, 255, 255, 0.9);
+  --qt-surface-strong: rgba(255, 255, 255, 0.95);
+  --qt-surface-solid: #ffffff;
+  --qt-card-bg: #ffffff;
+  --qt-panel: rgba(255, 255, 255, 0.92);
+  --qt-sidebar-bg: rgba(240, 253, 250, 0.96);
+  
+  --qt-primary: #0d9488;
+  --qt-primary-2: #14b8a6;
+  --qt-primary-3: #5eead4;
+  --qt-primary-soft: rgba(13, 148, 136, 0.1);
+  --qt-btn-text: #042f2e;
+  
+  --qt-text: #0f172a;
+  --qt-text-2: #475569;
+  --qt-text-3: #64748b;
+  --qt-text-muted: #94a3b8;
+  
+  --qt-border: rgba(15, 23, 42, 0.1);
+  --qt-border-strong: rgba(15, 23, 42, 0.2);
+  
+  --qt-input-bg: rgba(255, 255, 255, 0.8);
+  --qt-input-bg-focus: rgba(255, 255, 255, 0.95);
+  --qt-input-fg: #0f172a;
+  --qt-input-placeholder: #94a3b8;
+  
+  --qt-shadow-md: 0 4px 20px rgba(0, 0, 0, 0.08);
+  --qt-shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.12);
+}
+
+/* 浅色蓝紫 */
+:root[data-theme="original-ui"] {
+  --qt-bg: #f5f3ff;
+  --qt-bg-soft: #ede9fe;
+  --qt-surface: rgba(255, 255, 255, 0.9);
+  --qt-surface-strong: rgba(255, 255, 255, 0.95);
+  --qt-surface-solid: #ffffff;
+  --qt-card-bg: #ffffff;
+  --qt-panel: rgba(255, 255, 255, 0.92);
+  --qt-sidebar-bg: rgba(245, 243, 255, 0.96);
+  
+  --qt-primary: #7c3aed;
+  --qt-primary-2: #8b5cf6;
+  --qt-primary-3: #a78bfa;
+  --qt-primary-soft: rgba(124, 58, 237, 0.1);
+  --qt-btn-text: #ffffff;
+  
+  --qt-text: #1e1b4b;
+  --qt-text-2: #4c1d95;
+  --qt-text-3: #6d28d9;
+  --qt-text-muted: #7c3aed;
+  
+  --qt-border: rgba(124, 58, 237, 0.15);
+  --qt-border-strong: rgba(124, 58, 237, 0.25);
+  
+  --qt-input-bg: rgba(255, 255, 255, 0.8);
+  --qt-input-bg-focus: rgba(255, 255, 255, 0.95);
+  --qt-input-fg: #1e1b4b;
+  --qt-input-placeholder: #a78bfa;
+  
+  --qt-shadow-md: 0 4px 20px rgba(124, 58, 237, 0.1);
+  --qt-shadow-lg: 0 10px 40px rgba(124, 58, 237, 0.15);
+}
+
+/* 黑橙渐变 */
+:root[data-theme="black-orange"] {
+  --qt-bg: #0a0a0a;
+  --qt-bg-soft: #171717;
+  --qt-surface: rgba(23, 23, 23, 0.9);
+  --qt-surface-strong: rgba(30, 30, 30, 0.95);
+  --qt-surface-solid: #1e1e1e;
+  --qt-card-bg: #1a1a1a;
+  --qt-panel: rgba(23, 23, 23, 0.92);
+  --qt-sidebar-bg: rgba(10, 10, 10, 0.96);
+  
+  --qt-primary: #ea580c;
+  --qt-primary-2: #f97316;
+  --qt-primary-3: #fb923c;
+  --qt-primary-soft: rgba(234, 88, 12, 0.15);
+  --qt-btn-text: #ffffff;
+  
+  --qt-text: #fafafa;
+  --qt-text-2: #a3a3a3;
+  --qt-text-3: #8a8a8a;
+  --qt-text-muted: #737373;
+  
+  --qt-border: rgba(255, 255, 255, 0.1);
+  --qt-border-strong: rgba(255, 255, 255, 0.2);
+  
+  --qt-input-bg: rgba(10, 10, 10, 0.8);
+  --qt-input-bg-focus: rgba(10, 10, 10, 0.95);
+  --qt-input-fg: #fafafa;
+  --qt-input-placeholder: #737373;
+  
+  --qt-shadow-md: 0 4px 20px rgba(234, 88, 12, 0.15);
+  --qt-shadow-lg: 0 10px 40px rgba(234, 88, 12, 0.2);
+}
+
+/* 暗红炽焰 */
+:root[data-theme="dark-crimson"] {
+  --qt-bg: #1a0505;
+  --qt-bg-soft: #2a0a0a;
+  --qt-surface: rgba(42, 10, 10, 0.9);
+  --qt-surface-strong: rgba(55, 15, 15, 0.95);
+  --qt-surface-solid: #370f0f;
+  --qt-card-bg: #2d0a0a;
+  --qt-panel: rgba(42, 10, 10, 0.92);
+  --qt-sidebar-bg: rgba(26, 5, 5, 0.96);
+  
+  --qt-primary: #dc2626;
+  --qt-primary-2: #ef4444;
+  --qt-primary-3: #f87171;
+  --qt-primary-soft: rgba(220, 38, 38, 0.15);
+  --qt-btn-text: #ffffff;
+  
+  --qt-text: #fef2f2;
+  --qt-text-2: #fca5a5;
+  --qt-text-3: #fb8a8a;
+  --qt-text-muted: #f87171;
+  
+  --qt-border: rgba(252, 165, 165, 0.12);
+  --qt-border-strong: rgba(252, 165, 165, 0.25);
+  
+  --qt-input-bg: rgba(26, 5, 5, 0.8);
+  --qt-input-bg-focus: rgba(26, 5, 5, 0.95);
+  --qt-input-fg: #fef2f2;
+  --qt-input-placeholder: #f87171;
+  
+  --qt-shadow-md: 0 4px 20px rgba(220, 38, 38, 0.2);
+  --qt-shadow-lg: 0 10px 40px rgba(220, 38, 38, 0.25);
+}
+
+/* 主题过渡动画 */
+:root {
+  transition: 
+    --qt-bg 0.3s ease,
+    --qt-primary 0.3s ease,
+    background-color 0.3s ease;
+}
+
+body {
+  background-color: var(--qt-bg);
+  color: var(--qt-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}

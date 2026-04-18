@@ -1,0 +1,36 @@
+appId: com.liying.ai
+productName: 厉影AI
+directories:
+  buildResources: build
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/**/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!out/renderer/assets/bgms/**/*'
+  - '!out/renderer/assets/fonts/**/*'
+  - '!out/renderer/assets/videos/**/*'
+  - '!out/renderer/assets/voices/**/*'
+  - '!out/renderer/assets/title-styles/**/*'
+asarUnpack:
+  - assets/**/*
+  - ffmpeg/**/*
+  - chrome/**/*
+  - douyin/**/*
+  - node_modules/@napi-rs/**/*
+afterPack: build/afterPack.cjs
+win:
+  icon: build/icon.ico
+  executableName: liying-ai
+  signAndEditExecutable: false
+  target:
+    - nsis
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
