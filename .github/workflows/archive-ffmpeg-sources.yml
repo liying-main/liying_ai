@@ -1,0 +1,83 @@
+name: Archive pinned FFmpeg sources
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/v3.2.8]
+    paths: [.github/workflows/archive-ffmpeg-sources.yml]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Archive exact upstream build downloads without executing them
+        shell: bash
+        run: |
+          mkdir source-assets
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, urllib.request, urllib.error, zipfile
+          root = pathlib.Path('source-assets')
+          api = 'https://api.github.com'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'User-Agent': 'Liying-source-archive', 'Accept': 'application/vnd.github+json'}
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl): return None
+          opener = urllib.request.build_opener(NoRedirect)
+          def get_api(path):
+              with urllib.request.urlopen(urllib.request.Request(api + path, headers=headers), timeout=60) as r:
+                  return json.load(r)
+          release = get_api('/repos/' + os.environ['GH_REPO'] + '/releases/tags/v3.2.8')
+          assert release['draft'], 'Only a draft release may be populated by this workflow'
+          meta = get_api('/repos/BtbN/FFmpeg-Builds/actions/artifacts/12896831185')
+          expected = 'd445c150c844be2e95e55367495b077d753df3e52add668d23392b2ec7d5901f'
+          assert not meta['expired'] and meta['digest'] == 'sha256:' + expected
+          try:
+              opener.open(urllib.request.Request(meta['archive_download_url'], headers=headers), timeout=60)
+              raise RuntimeError('Expected artifact redirect')
+          except urllib.error.HTTPError as e:
+              if e.code not in (301, 302, 303, 307, 308): raise
+              location = e.headers['Location']
+          # Never forward GitHub authorization to the signed storage URL.
+          cache = pathlib.Path('BtbN-download-cache-run-40871264069.zip')
+          with urllib.request.urlopen(location, timeout=300) as r, cache.open('wb') as f:
+              shutil.copyfileobj(r, f, 1024 * 1024)
+          def digest(p):
+              h = hashlib.sha256()
+              with p.open('rb') as f:
+                  for b in iter(lambda: f.read(1024 * 1024), b''): h.update(b)
+              return h.hexdigest()
+          assert cache.stat().st_size == 2240577161 and digest(cache) == expected
+          with zipfile.ZipFile(cache) as z:
+              entries = [{'path': i.filename, 'bytes': i.file_size} for i in z.infolist()]
+              assert z.testzip() is None
+          sources = [
+              ('FFmpeg-ae19868753c5bcc2044e331d7a64187e58dde619.tar.gz', 'https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/ae19868753c5bcc2044e331d7a64187e58dde619'),
+              ('FFmpeg-Builds-5031c6f1082414e53688d39e521849905071070d.zip', 'https://codeload.github.com/BtbN/FFmpeg-Builds/zip/5031c6f1082414e53688d39e521849905071070d'),
+          ]
+          for name, url in sources:
+              with urllib.request.urlopen(url, timeout=300) as r, (root / name).open('wb') as f:
+                  shutil.copyfileobj(r, f, 1024 * 1024)
+          parts = []
+          with cache.open('rb') as f:
+              index = 1
+              while True:
+                  data = f.read(1024 * 1024 * 1024)
+                  if not data: break
+                  p = root / (cache.name + '.part%02d' % index)
+                  p.write_bytes(data)
+                  parts.append({'name': p.name, 'bytes': len(data), 'sha256': digest(p)})
+                  index += 1
+          (root / 'FFmpeg-source-provenance.json').write_text(json.dumps({'upstream_artifact': meta, 'cache_zip_entries': entries, 'cache_sha256': expected, 'parts': parts, 'sources': sources}, indent=2) + '\n')
+          (root / 'SHA256SUMS.sources.txt').write_text(''.join(digest(p) + '  ' + p.name + '\n' for p in sorted(root.iterdir()) if p.is_file()))
+          print(json.dumps({'verified_cache_bytes': cache.stat().st_size, 'entries': entries, 'parts': parts}, indent=2))
+          PY
+      - name: Attach archived source materials to draft release
+        shell: bash
+        run: gh release upload v3.2.8 source-assets/* --repo "$GH_REPO" --clobber
