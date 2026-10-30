@@ -60,6 +60,4 @@ pnpm build:win
 ## 相关开源项目
 
 - [数字人桌面版 / 口播智能体](https://github.com/liying-main/liying_ai)
-- [数字人轻量版](https://github.com/liying-main/digitalhuman-open)
 - [混剪桌面版](https://github.com/liying-main/liying-videomix)
-- [混剪轻量版](https://github.com/liying-main/videomix-open)
