@@ -5,6 +5,34 @@ import { useSettingsStore } from './SettingsStore'
 
 // Cache for local server base URL
 let _localServerBaseUrl: string | null = null
+let _cloudResourcesPromise: Promise<void> | null = null
+const REMOTE_URL_RE = /^https?:\/\//i
+
+function isRemoteUrl(value: unknown): value is string {
+  return typeof value === 'string' && REMOTE_URL_RE.test(value)
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.length > 0)
+}
+
+async function ensureCloudResourcesReady(): Promise<void> {
+  if (_cloudResourcesPromise) return _cloudResourcesPromise
+  _cloudResourcesPromise = (async () => {
+    try {
+      const ready = await (window as any).api?.isCloudResourcesReady?.()
+      if (ready) return
+      const result = await (window as any).api?.ensureCloudResources?.()
+      if (result && result.success === false) {
+        console.warn('[Resources] Cloud resources unavailable:', result.error)
+      }
+    } catch (error) {
+      console.warn('[Resources] Cloud resources check failed:', error)
+    }
+  })()
+  return _cloudResourcesPromise
+}
+
 async function getAssetsBaseUrl(): Promise<string> {
   if (_localServerBaseUrl !== null) return _localServerBaseUrl
   try {
@@ -19,6 +47,7 @@ async function getAssetsBaseUrl(): Promise<string> {
 // Helper to load config from assets - uses IPC in Electron, fetch in dev
 async function loadAssetsConfig(path: string) {
   try {
+    await ensureCloudResourcesReady()
     // Try local server URL first (works in both dev and production)
     const baseUrl = await getAssetsBaseUrl()
     if (baseUrl) {
@@ -41,15 +70,27 @@ async function loadBuiltinVoicesFromAssets() {
   if (!cfg?.voices) return []
   const baseUrl = await getAssetsBaseUrl()
   const prefix = baseUrl ? `${baseUrl}/assets` : '/assets'
-  return cfg.voices.map((v: any) => {
+  const voices = await Promise.all(cfg.voices.map(async (v: any) => {
     const ext = v.id.startsWith('voice') ? '.wav' : '.mp3'
+    const configuredPath = firstString(v.path, v.url, v.audioUrl, v.src)
+    const voicePath = configuredPath || `${prefix}/voices/${encodeURIComponent(v.id)}${ext}`
+    // 公开分发不附带内置录音；仅把实际存在的本地资源显示为可用。
+    // 这里不请求第三方音频地址，避免打开工作台时自动联系外部服务。
+    if (configuredPath && !configuredPath.startsWith(`${prefix}/`)) return null
+    try {
+      const response = await fetch(voicePath, { method: 'HEAD' })
+      if (!response.ok || !response.headers.get('content-type')?.startsWith('audio/')) return null
+    } catch {
+      return null
+    }
     return {
       id: v.id,
       name: v.name || v.id,
-      path: `${prefix}/voices/${v.id}${ext}`,
+      path: voicePath,
       promptText: v.promptText || ''
     }
-  })
+  }))
+  return voices.filter(Boolean)
 }
 
 // Build BGMs list with paths
@@ -61,7 +102,7 @@ async function loadBuiltinBgmsFromAssets() {
   return cfg.bgms.map((b: any) => ({
     id: b.id,
     name: b.name || b.id,
-    path: `${prefix}/bgms/${b.id}.mp3`,
+    path: firstString(b.path, b.url, b.audioUrl, b.src) || `${prefix}/bgms/${b.id}.mp3`,
     category: b.category || ''
   }))
 }
@@ -74,11 +115,13 @@ async function loadBuiltinVideosFromAssets() {
   const prefix = baseUrl ? `${baseUrl}/assets` : '/assets'
   return cfg.videos.map((v: any) => {
     const encodedId = encodeURIComponent(v.id)
+    const videoPath = firstString(v.path, v.url, v.videoUrl, v.src) || `${prefix}/videos/${encodedId}.mp4`
+    const coverUrl = firstString(v.coverUrl, v.cover, v.poster)
     return {
       id: v.id,
       name: v.name || v.id,
-      path: `${prefix}/videos/${encodedId}.mp4`,
-      coverUrl: `${prefix}/videos/${encodedId}.mp4`
+      path: videoPath,
+      coverUrl: coverUrl || videoPath
     }
   })
 }
@@ -126,6 +169,8 @@ interface VideoPageState {
   // Subtitles
   subtitleText: string
   whisperSegments: any[]
+  /** 上次 Whisper 对齐时使用的字幕文案；与 subtitleText 不一致时需重新对齐 */
+  whisperAlignedSubtitleText: string
   subtitleFont: string
   subtitleFontSize: number
   subtitleFontWeight: number
@@ -173,6 +218,7 @@ interface VideoPageState {
   // Publishing
   publishPlatforms: string[]
   publishMode: string
+  publishAccountIds: Record<string, string>
 
   // Processing state
   activeProcessingType: string | null
@@ -204,6 +250,7 @@ interface VideoPageState {
   setAudioDuration: (v: number) => void
   setSubtitleText: (v: string) => void
   setWhisperSegments: (v: any[]) => void
+  setWhisperAlignedSubtitleText: (v: string) => void
   setSubtitleFont: (v: string) => void
   setSubtitleFontSize: (v: number) => void
   setSubtitleFontWeight: (v: number) => void
@@ -246,6 +293,7 @@ interface VideoPageState {
   setRunAutoFlow: (fn: (() => void) | null) => void
   setPublishPlatforms: (v: string[]) => void
   setPublishMode: (v: string) => void
+  setPublishAccountId: (platform: string, accountId: string) => void
   setBuiltinVideos: (v: any[]) => void
   setAvailableFonts: (v: string[]) => void
   setBuiltinTitleStyles: (v: any[]) => void
@@ -305,6 +353,7 @@ const initialState = {
   flowMode: 'manual',
   subtitleText: '',
   whisperSegments: [],
+  whisperAlignedSubtitleText: '',
   subtitleFont: '黑体',
   subtitleFontSize: 36,
   subtitleFontWeight: 400,
@@ -342,6 +391,7 @@ const initialState = {
   selectedTitleStyleId: useSettingsStore.getState().selectedTitleStyleId || '',
   publishPlatforms: ['douyin'],
   publishMode: 'manual',
+  publishAccountIds: {},
   activeProcessingType: null,
   processingProgress: 0,
   autoFlowRunning: false,
@@ -372,7 +422,11 @@ export const useVideoPageStore = create<VideoPageState>()(
       setGeneratedAudioPath: (v) => set({ generatedAudioPath: v }),
       setAudioDuration: (v) => set({ audioDuration: v }),
       setSubtitleText: (v) => set({ subtitleText: v }),
-      setWhisperSegments: (v) => set({ whisperSegments: v }),
+      setWhisperSegments: (v) => set({
+        whisperSegments: v,
+        ...(v.length === 0 ? { whisperAlignedSubtitleText: '' } : {}),
+      }),
+      setWhisperAlignedSubtitleText: (v) => set({ whisperAlignedSubtitleText: v }),
       setSubtitleFont: (v) => set({ subtitleFont: v }),
       setSubtitleFontSize: (v) => set({ subtitleFontSize: v }),
       setSubtitleFontWeight: (v) => set({ subtitleFontWeight: v }),
@@ -413,8 +467,13 @@ export const useVideoPageStore = create<VideoPageState>()(
       setAutoFlowRunning: (v) => set({ autoFlowRunning: v }),
       setAutoFlowStep: (v) => set({ autoFlowStep: v }),
       setRunAutoFlow: (fn) => set({ runAutoFlow: fn }),
-      setPublishPlatforms: (v) => set({ publishPlatforms: v }),
-      setPublishMode: (v) => set({ publishMode: v }),
+      setPublishPlatforms: (v) =>
+        set({ publishPlatforms: Array.isArray(v) && v.length > 0 ? v : ['douyin'] }),
+      setPublishMode: (v) => set({ publishMode: v || 'manual' }),
+      setPublishAccountId: (platform, accountId) =>
+        set((state) => ({
+          publishAccountIds: { ...state.publishAccountIds, [platform]: accountId },
+        })),
       setBuiltinVideos: (v) => set({ builtinVideos: v }),
       setAvailableFonts: (v) => set({ availableFonts: v }),
       setBuiltinTitleStyles: (v) => set({ builtinTitleStyles: v }),
@@ -444,13 +503,136 @@ export const useVideoPageStore = create<VideoPageState>()(
         titleSegmentRange: null,
       }),
       
-      // Resource loaders - disabled, no resources to load
-      loadVoices: async () => {},
-      loadBgms: async () => {},
-      loadVideos: async () => {},
-      loadTitleStyles: async () => {},
-      loadAssetsFonts: async () => {},
-      loadAllResources: async () => {},
+      // Resource loaders - load from assets config files with proper paths
+      loadVoices: async () => {
+        try {
+          const [voices, uploadedVoicesConfig] = await Promise.all([
+            loadBuiltinVoicesFromAssets(),
+            window.api.loadUploadedVoicesConfig?.()
+          ])
+          set({ builtinVoices: voices, uploadedVoices: uploadedVoicesConfig?.voices ?? [] })
+        } catch (e) {
+          console.error('Failed to load voices:', e)
+          set({ builtinVoices: [], uploadedVoices: [] })
+        }
+      },
+      loadBgms: async () => {
+        try {
+          const [bgms, uploadedBgmsConfig] = await Promise.all([
+            loadBuiltinBgmsFromAssets(),
+            window.api.loadUploadedBgmsConfig?.()
+          ])
+          set({ builtinBgms: bgms, uploadedBgms: uploadedBgmsConfig?.bgms ?? [] })
+        } catch (e) {
+          console.error('Failed to load BGMs:', e)
+          set({ builtinBgms: [], uploadedBgms: [] })
+        }
+      },
+      loadVideos: async () => {
+        try {
+          const [videos, uploadedVideosConfig] = await Promise.all([
+            loadBuiltinVideosFromAssets(),
+            window.api.loadUploadedVideosConfig?.()
+          ])
+          set({ builtinVideos: videos, uploadedVideos: uploadedVideosConfig?.videos ?? [] })
+        } catch (e) {
+          console.error('Failed to load videos:', e)
+          set({ builtinVideos: [], uploadedVideos: [] })
+        }
+      },
+      loadTitleStyles: async () => {
+        try {
+          const result = await window.api.listBuiltinTitleStyles()
+          const styles = Array.isArray(result) ? result : []
+          const imageUrls: Record<string, string> = {}
+          const videoUrls: Record<string, string> = {}
+          
+          const resolvePromises = styles.map(async (style) => {
+            if (style.previewImage) {
+              try {
+                const res = await window.api.getLocalFileUrl(style.previewImage)
+                if (res.success && res.url) {
+                  imageUrls[style.id] = res.url
+                } else {
+                  console.warn(`[loadTitleStyles] image resolve failed for ${style.id}:`, res.error)
+                }
+              } catch (err) {
+                console.error(`[loadTitleStyles] image error for ${style.id}:`, err)
+              }
+            }
+            if (style.previewVideo) {
+              try {
+                const res = await window.api.getLocalFileUrl(style.previewVideo)
+                if (res.success && res.url) {
+                  videoUrls[style.id] = res.url
+                } else {
+                  console.warn(`[loadTitleStyles] video resolve failed for ${style.id}:`, res.error)
+                }
+              } catch (err) {
+                console.error(`[loadTitleStyles] video error for ${style.id}:`, err)
+              }
+            }
+          })
+          await Promise.all(resolvePromises)
+          
+          set({
+            builtinTitleStyles: styles,
+            titleStyleImageUrls: imageUrls,
+            titleStyleVideoUrls: videoUrls
+          })
+        } catch (e) {
+          console.error('Failed to load title styles:', e)
+          set({ builtinTitleStyles: [], titleStyleImageUrls: {}, titleStyleVideoUrls: {} })
+        }
+      },
+      loadAssetsFonts: async () => {
+        try {
+          const fonts = await window.api.listAssetsFonts()
+          if (fonts.length === 0) {
+            set({ availableFonts: ['黑体'] })
+            return
+          }
+          
+          const loadedFamilies: string[] = ['黑体']
+          
+          for (const { path, fontFamily } of fonts) {
+            try {
+              const result = await window.api.getLocalFileUrl(path)
+              if (!result.success) {
+                console.warn(`Failed to get URL for font ${fontFamily}:`, result.error)
+                continue
+              }
+              
+              const font = new FontFace(fontFamily, `url(${result.url})`)
+              await font.load()
+              document.fonts.add(font)
+              
+              if (!loadedFamilies.includes(fontFamily)) {
+                loadedFamilies.push(fontFamily)
+              }
+              console.log(`[Fonts] Loaded font: ${fontFamily}`)
+            } catch (err) {
+              console.warn(`Failed to load font ${fontFamily}:`, err)
+            }
+          }
+          
+          set({ availableFonts: loadedFamilies })
+          console.log('[Fonts] Available fonts:', loadedFamilies)
+        } catch (e) {
+          console.error('Failed to load fonts:', e)
+          set({ availableFonts: ['黑体'] })
+        }
+      },
+      loadAllResources: async () => {
+        const state = useVideoPageStore.getState()
+        await Promise.all([
+          state.loadVoices(),
+          state.loadBgms(),
+          state.loadVideos(),
+          state.loadTitleStyles(),
+          state.loadAssetsFonts()
+        ])
+      },
       resetState: () => set(initialState)
     }),
     {

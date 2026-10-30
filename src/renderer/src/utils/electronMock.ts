@@ -10,7 +10,8 @@ const mockApi = {
   windowIsMaximized: async () => false,
 
   // File operations
-  selectFile: async (options?: any) => ({ canceled: true, filePaths: [] }),
+  selectFile: async (options?: any) => null,
+  selectFiles: async (options?: any) => ({ canceled: true, filePaths: [] }),
   selectDirectory: async (options?: any) => ({ canceled: true, filePaths: [] }),
   saveLocalFileAs: async (filePath: string) => ({ success: true, filePath }),
   getAssetsPath: async (relativePath: string) => `/assets/${relativePath}`,
@@ -19,9 +20,16 @@ const mockApi = {
   listUserDataFiles: async () => [],
   deleteUserDataFile: async () => ({ success: true }),
   getLocalFileUrl: async (filePath: string) => ({ success: true, url: filePath }),
+  ensureCloudResources: async () => ({ success: true }),
+  isCloudResourcesReady: async () => true,
+  getCloudResourcesDir: async () => '/mock/cloud-resources',
+  onCloudResourceProgress: () => () => {},
   readFileAsBase64: async () => '',
   saveFileFromBase64: async (base64: string, fileName: string, subPath?: string) => 
     ({ success: true, file_path: `/mock/${subPath}/${fileName}` }),
+  copyLocalFileToUserData: async (sourcePath: string) => ({ success: true, file_path: sourcePath }),
+  uploadVideoMaterial: async (sourcePath: string, originalName: string) =>
+    ({ success: true, file_path: sourcePath, video_id: `mock_${originalName}` }),
 
   // Video history
   getVideoGenerateHistory: async () => [],
@@ -70,8 +78,17 @@ const mockApi = {
 
   // Platform publishing
   browserOpenPlatform: async () => {},
-  browserNavigate: async () => {},
-  browserRunPublishFlow: async () => ({ success: false }),
+  browserNavigate: async () => ({ success: false }),
+  browserRunPublishFlow: async () => ({ success: false, message: '请在Electron环境中使用' }),
+  browserLoginAccount: async () => ({ success: false, error: '请在Electron环境中使用' }),
+  browserOpenAccount: async () => ({ success: false, error: '请在Electron环境中使用' }),
+  browserCheckAccountStatus: async () => ({ success: false, is_valid: false, message: '请在Electron环境中使用' }),
+  getPublishAccounts: async () => [],
+  savePublishAccounts: async () => ({ success: true }),
+  getPublishTasks: async () => [],
+  savePublishTasks: async () => ({ success: true }),
+  ensurePublishProfileDir: async (accountId: string) => ({ success: true, userDataDir: `/mock/profiles/${accountId}` }),
+  onPublishAccountStatusChanged: () => () => {},
 
   // Download operations
   downloadDouyinVideo: async (url: string) => ({ success: false, error: '请在Electron环境中使用' }),

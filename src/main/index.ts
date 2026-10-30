@@ -6,6 +6,7 @@ import { registerAllIpcHandlers } from './ipc-handlers'
 import { registerUpdaterHandlers } from './ipc-handlers/ipc-updater'
 import { setMainWindowForPluginToken, abandonClientPluginQueues } from './ipc-handlers/ipc-plugin-proxy'
 import { CHANNEL } from '../shared/channel.generated'
+import { getWindowIconRelativePath, ensureDouyinDownloader } from './platform-paths'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -79,6 +80,7 @@ function attachDynamicPageZoom(win: BrowserWindow): () => void {
 }
 
 function createWindow(): void {
+  const iconPath = getWindowIconRelativePath()
   mainWindow = new BrowserWindow({
     width: 1600,
     height: 960,
@@ -86,7 +88,7 @@ function createWindow(): void {
     frame: false,
     titleBarStyle: 'hidden',
     autoHideMenuBar: true,
-    icon: join(__dirname, '../../build/icon.ico'),
+    icon: iconPath ? join(__dirname, iconPath) : undefined,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -120,37 +122,51 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
-  app.setName(CHANNEL.packageName)
-  electronApp.setAppUserModelId(CHANNEL.appId)
+const gotTheLock = app.requestSingleInstanceLock()
 
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
-  })
-
-  // Start local file server for video playback
-  startLocalFileServer()
-  
-  // Register all IPC handlers
-  registerAllIpcHandlers()
-  registerUpdaterHandlers()
-
-  createWindow()
-  
-  // Set main window reference for plugin token management
-  if (mainWindow) {
-    setMainWindowForPluginToken(mainWindow)
-  }
-
-  app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
-      if (mainWindow) {
-        setMainWindowForPluginToken(mainWindow)
-      }
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
     }
   })
-})
+
+  app.whenReady().then(() => {
+    app.setName(CHANNEL.packageName)
+    electronApp.setAppUserModelId(CHANNEL.appId)
+
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    // Start local file server for video playback
+    startLocalFileServer()
+    ensureDouyinDownloader()
+    
+    // Register all IPC handlers
+    registerAllIpcHandlers()
+    registerUpdaterHandlers()
+
+    createWindow()
+    
+    // Set main window reference for plugin token management
+    if (mainWindow) {
+      setMainWindowForPluginToken(mainWindow)
+    }
+
+    app.on('activate', function () {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+        if (mainWindow) {
+          setMainWindowForPluginToken(mainWindow)
+        }
+      }
+    })
+  })
+}
 
 let isQuitting = false
 

@@ -9,6 +9,11 @@ const api = {
   windowIsMaximized: () => ipcRenderer.invoke('window-is-maximized'),
 
   // System info
+  // 中转站配置（开源版：API Key 由用户在设置里填写，主进程持有）
+  getStationConfig: () => ipcRenderer.invoke('station:get-config'),
+  saveStationConfig: (patch: any) => ipcRenderer.invoke('station:save-config', patch),
+  testStationConfig: (config: { baseUrl: string; apiKey: string }) => ipcRenderer.invoke('station:test-config', config),
+
   getSystemArch: () => {
     const a = process.arch
     if (a === 'ia32') return 'x86'
@@ -22,6 +27,7 @@ const api = {
 
   // File operations
   selectFile: (options?: any) => ipcRenderer.invoke('select-file', options),
+  selectFiles: (options?: any) => ipcRenderer.invoke('select-files', options),
   selectDirectory: (options?: any) => ipcRenderer.invoke('select-directory', options),
   saveLocalFileAs: (sourcePath: string) => ipcRenderer.invoke('save-local-file-as', sourcePath),
   getLocalServerBaseUrl: () => ipcRenderer.invoke('get-local-server-base-url'),
@@ -31,8 +37,19 @@ const api = {
   listUserDataFiles: (subPath: string, recursive?: boolean) => ipcRenderer.invoke('list-user-data-files', subPath, recursive),
   deleteUserDataFile: (filePath: string) => ipcRenderer.invoke('delete-user-data-file', filePath),
   getLocalFileUrl: (filePath: string) => ipcRenderer.invoke('get-local-file-url', filePath),
+  getSmartcutPreviewUrl: (filePath: string) => ipcRenderer.invoke('get-smartcut-preview-url', filePath),
+  ensureSmartcutPreviewVideo: (filePath: string) => ipcRenderer.invoke('ensure-smartcut-preview-video', filePath),
+  ensureCloudResources: () => ipcRenderer.invoke('ensure-cloud-resources'),
+  isCloudResourcesReady: () => ipcRenderer.invoke('is-cloud-resources-ready'),
+  getCloudResourcesDir: () => ipcRenderer.invoke('get-cloud-resources-dir'),
+  onCloudResourceProgress: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data)
+    ipcRenderer.on('cloud-resource-progress', handler)
+    return () => ipcRenderer.removeListener('cloud-resource-progress', handler)
+  },
   readFileAsBase64: (filePath: string) => ipcRenderer.invoke('read-file-as-base64', filePath),
   saveFileFromBase64: (base64Data: string, fileName: string, subPath?: string) => ipcRenderer.invoke('save-file-from-base64', base64Data, fileName, subPath),
+  copyLocalFileToUserData: (sourcePath: string, originalName: string, subPath?: string) => ipcRenderer.invoke('copy-local-file-to-user-data', sourcePath, originalName, subPath),
 
   // Video history
   getVideoGenerateHistory: () => ipcRenderer.invoke('get-video-generate-history'),
@@ -52,6 +69,7 @@ const api = {
   addBgmToVideo: (videoPath: string, bgmPath: string, volume: number, options?: any) => ipcRenderer.invoke('add-bgm-to-video', videoPath, bgmPath, volume, options),
   composeVideoWithMixSegments: (baseVideoPath: string, totalDuration: number, segments: any[]) => ipcRenderer.invoke('compose-video-with-mix-segments', baseVideoPath, totalDuration, segments),
   composeVideoWithPipSegments: (baseVideoPath: string, totalDuration: number, segments: any[], mainVideoScaling?: any) => ipcRenderer.invoke('compose-video-with-pip-segments', baseVideoPath, totalDuration, segments, mainVideoScaling),
+  scaleMainVideo: (videoPath: string, rect: any, bgColor: string) => ipcRenderer.invoke('scale-main-video', videoPath, rect, bgColor),
 
   // Assets
   listBuiltinVoices: () => ipcRenderer.invoke('list-builtin-voices'),
@@ -75,17 +93,37 @@ const api = {
   savePipResourcesConfig: (config: any) => ipcRenderer.invoke('save-pip-resources-config', config),
   uploadVideoMaterial: (sourcePath: string, originalName: string) => ipcRenderer.invoke('upload-video-material', sourcePath, originalName),
   uploadBgmMaterial: (sourcePath: string, originalName: string, category?: string) => ipcRenderer.invoke('upload-bgm-material', sourcePath, originalName, category),
+  uploadPipMaterial: (sourcePath: string, originalName: string) => ipcRenderer.invoke('upload-pip-material', sourcePath, originalName),
 
   // Platform publishing
   browserOpenPlatform: (platform: string) => ipcRenderer.invoke('browser-open-platform', platform),
   browserNavigate: (platform: string, url: string) => ipcRenderer.invoke('browser-navigate', platform, url),
   browserRunPublishFlow: (platform: string, params: any) => ipcRenderer.invoke('browser-run-publish-flow', platform, params),
+  browserLoginAccount: (params: { platform: string; userDataDir?: string; accountId?: string }) => ipcRenderer.invoke('browser-login-account', params),
+  browserOpenAccount: (params: { platform: string; userDataDir?: string; accountId?: string }) => ipcRenderer.invoke('browser-open-account', params),
+  browserCheckAccountStatus: (params: { platform: string; userDataDir?: string; accountId?: string }) => ipcRenderer.invoke('browser-check-account-status', params),
+  getPublishAccounts: () => ipcRenderer.invoke('get-publish-accounts'),
+  savePublishAccounts: (list: any[]) => ipcRenderer.invoke('save-publish-accounts', list),
+  getPublishTasks: () => ipcRenderer.invoke('get-publish-tasks'),
+  savePublishTasks: (list: any[]) => ipcRenderer.invoke('save-publish-tasks', list),
+  ensurePublishProfileDir: (accountId: string) => ipcRenderer.invoke('ensure-publish-profile-dir', accountId),
+  onPublishAccountStatusChanged: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data)
+    ipcRenderer.on('publish-account-status-changed', handler)
+    return () => ipcRenderer.removeListener('publish-account-status-changed', handler)
+  },
 
   // Download operations
+  douyinDownloaderAvailable: () => ipcRenderer.invoke('douyin-downloader-available'),
   downloadDouyinVideo: (videoUrl: string) => ipcRenderer.invoke('download-douyin-video', videoUrl),
   downloadDouyinUserPosts: (profileUrl: string) => ipcRenderer.invoke('download-douyin-user-posts', profileUrl),
   downloadAudioFromUrl: (audioUrl: string, options?: any) => ipcRenderer.invoke('download-audio-from-url', audioUrl, options),
   downloadVideoFromUrl: (videoUrl: string, fileName: string) => ipcRenderer.invoke('download-video-from-url', videoUrl, fileName),
+  onVideoDownloadProgress: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data)
+    ipcRenderer.on('video-download-progress', handler)
+    return () => ipcRenderer.removeListener('video-download-progress', handler)
+  },
   uploadVoiceAndTranscribe: (filePath: string, fileName: string) => ipcRenderer.invoke('upload-voice-and-transcribe', filePath, fileName),
   loadUploadedVideosConfig: () => ipcRenderer.invoke('load-uploaded-videos-config'),
   saveUploadedVideosConfig: (config: any) => ipcRenderer.invoke('save-uploaded-videos-config', config),

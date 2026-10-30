@@ -3,6 +3,8 @@
 import { useCallback } from 'react'
 import { useVideoPageStore } from '../store/VideoPageStore'
 import { useToast } from './useToast'
+import { ensureWhisperSegmentsIfNeeded } from '../pages/Video/VideoSharedComponents'
+import { generateCombinedTitleImage } from '../utils/titleCanvasRenderer'
 
 const DEFAULT_BGM_CARD_VOICE_VOLUME = 2
 const DEFAULT_BGM_CARD_MUSIC_VOLUME = 0.6
@@ -25,186 +27,51 @@ function splitTextByBreakLength(text: string, breakLength: number): string[] {
   return result
 }
 
-// Parse hex color with alpha (e.g. #000000dd) for canvas fillStyle
-function parseColorForCanvas(color: string): string {
-  if (!color) return color
-  if (color.length === 9 && color.startsWith('#')) {
-    const r = parseInt(color.slice(1, 3), 16)
-    const g = parseInt(color.slice(3, 5), 16)
-    const b = parseInt(color.slice(5, 7), 16)
-    const a = parseInt(color.slice(7, 9), 16) / 255
-    return `rgba(${r},${g},${b},${a.toFixed(3)})`
-  }
-  return color
-}
-
-// Fill rounded rectangle at (x, y, w, h) with borderRadius
-function fillRoundedRectAt(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-  if (r <= 0) {
-    ctx.fillRect(x, y, w, h)
-    return
-  }
-  r = Math.min(r, w / 2, h / 2)
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.lineTo(x + w - r, y)
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-  ctx.lineTo(x + w, y + h - r)
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-  ctx.lineTo(x + r, y + h)
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-  ctx.lineTo(x, y + r)
-  ctx.quadraticCurveTo(x, y, x + r, y)
-  ctx.closePath()
-  ctx.fill()
-}
-
-// Draw a title text block on canvas with full alignment support (matches VideoGenerateCard.tsx drawTitleBlockOnCanvas)
-function drawTitleBlockOnCanvas(ctx: CanvasRenderingContext2D, text: string, config: any, canvasWidth: number, yOffset: number): { boxHeight: number; totalHeight: number } {
-  if (!text) return { boxHeight: 0, totalHeight: 0 }
-  const fontSize = config.fontSize || 48
-  const font = config.font || '黑体'
-  const fontWeight = config.fontWeight ?? 400
-  const color = config.color || '#FFFFFF'
-  const strokeEnabled = config.strokeEnabled !== false && (config.strokeWidth ?? 0) > 0
-  const strokeColor = config.strokeColor || '#000000'
-  const strokeWidth = config.strokeWidth ?? 2
-  const bgColor = config.backgroundColor || 'transparent'
-  const borderRadius = config.borderRadius ?? 0
-  const bgPaddingH = config.bgPaddingH ?? fontSize * 0.5
-  const bgPaddingV = config.bgPaddingV ?? fontSize * 0.5
-  const shadowEnabled = config.shadowEnabled || false
-  const shadowColor = config.shadowColor || '#000000'
-  const shadowOffsetX = config.shadowOffsetX ?? 2
-  const shadowOffsetY = config.shadowOffsetY ?? 2
-  const shadowBlur = config.shadowBlur ?? 0
-  const alignH = config.alignH || 'center'
-  const lineHeight = fontSize * 1.2
-  const breakLength = config.breakLength
-  const lines = breakLength != null && text.length >= breakLength
-    ? splitTextByBreakLength(text, breakLength)
-    : [text]
-  ctx.font = `${fontWeight} ${fontSize}px "${font}"`
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  let maxW = 0
-  for (const line of lines) {
-    const w = ctx.measureText(line).width
-    if (w > maxW) maxW = w
-  }
-  const textTotalHeight = lines.length * lineHeight
-  const boxWidth = maxW + bgPaddingH * 2
-  const boxHeight = textTotalHeight + bgPaddingV * 2
-  let centerX: number
-  if (alignH === 'left') {
-    centerX = canvasWidth * 0.05 + boxWidth / 2
-  } else if (alignH === 'right') {
-    centerX = canvasWidth * 0.95 - boxWidth / 2
-  } else {
-    centerX = canvasWidth / 2
-  }
-  const centerY = yOffset + boxHeight / 2
-  const hasBg = bgColor && bgColor !== 'transparent'
-  if (hasBg) {
-    ctx.save()
-    ctx.fillStyle = parseColorForCanvas(bgColor)
-    fillRoundedRectAt(ctx, centerX - boxWidth / 2, centerY - boxHeight / 2, boxWidth, boxHeight, borderRadius)
-    ctx.restore()
-  }
-  const startY = centerY - textTotalHeight / 2 + lineHeight / 2
-  for (let i = 0; i < lines.length; i++) {
-    const ly = startY + i * lineHeight
-    if (shadowEnabled) {
-      ctx.shadowColor = shadowColor
-      ctx.shadowOffsetX = shadowOffsetX
-      ctx.shadowOffsetY = shadowOffsetY
-      ctx.shadowBlur = shadowBlur
+// Generate a combined title image (delegates to titleCanvasRenderer — same scale as subtitle)
+async function _generateCombinedTitleImageForVideo(
+  styleConfig: any,
+  videoPath: string
+): Promise<{ dataUrl: string; nativeResolution: boolean }> {
+  let videoWidth = 720
+  let videoHeight = 1280
+  try {
+    const dims = await (window as any).api?.getVideoDimensions?.(videoPath)
+    if (dims?.width && dims?.height) {
+      videoWidth = dims.width
+      videoHeight = dims.height
     }
-    if (strokeEnabled) {
-      ctx.shadowColor = 'transparent'
-      ctx.save()
-      ctx.lineJoin = 'round'
-      ctx.lineCap = 'round'
-      ctx.lineWidth = strokeWidth * 2
-      ctx.strokeStyle = strokeColor
-      ctx.strokeText(lines[i], centerX, ly)
-      ctx.restore()
-      if (shadowEnabled) {
-        ctx.shadowColor = shadowColor
-        ctx.shadowOffsetX = shadowOffsetX
-        ctx.shadowOffsetY = shadowOffsetY
-        ctx.shadowBlur = shadowBlur
-      }
-    }
-    ctx.fillStyle = color
-    ctx.fillText(lines[i], centerX, ly)
+  } catch (err) {
+    console.warn('[applyAllEffects] getVideoDimensions failed, using 720x1280:', err)
   }
-  ctx.shadowColor = 'transparent'
-  ctx.shadowBlur = 0
-  ctx.shadowOffsetX = 0
-  ctx.shadowOffsetY = 0
-  return { boxHeight, totalHeight: boxHeight }
+  return generateCombinedTitleImage(styleConfig, videoWidth, videoHeight)
 }
 
-// Generate a combined 720x1280 title image with proper alignment (matches VideoGenerateCard.tsx)
-async function generateCombinedTitleImage(styleConfig: any): Promise<{ dataUrl: string }> {
-  const mainFont = styleConfig.mainTitle.font || '黑体'
-  const mainWeight = styleConfig.mainTitle.fontWeight ?? 400
-  const mainSize = styleConfig.mainTitle.fontSize ?? 48
-  await document.fonts.load(`${mainWeight} ${mainSize}px "${mainFont}"`)
-  if (styleConfig.hasSubTitle && styleConfig.subTitle) {
-    const subFont = styleConfig.subTitle.font || '黑体'
-    const subWeight = styleConfig.subTitle.fontWeight ?? 400
-    const subSize = styleConfig.subTitle.fontSize ?? 36
-    await document.fonts.load(`${subWeight} ${subSize}px "${subFont}"`)
+// Strip punctuation for alignment character counting
+const _ALIGN_PUNCT_RE_TS = /[\s，。！？；：、…—.!?;:,\uff0c\uff01\uff1f\uff1a\uff1b\u3001\u2026\u2014"''\"\u201c\u201d\u2018\u2019]/g
+function _stripPunctCountTs(s: string): number {
+  return Math.max(s.replace(_ALIGN_PUNCT_RE_TS, '').length, 1)
+}
+function _postProcessAlignedTs(out: { text: string; start: number; end: number }[], audioEnd: number) {
+  if (!out.length) return out
+  const LINGER = 1.5
+  for (let i = 0; i < out.length - 1; i++) {
+    const g = out[i + 1].start - out[i].end
+    if (g > 0 && g <= LINGER) out[i].end = out[i + 1].start
+    else if (g > LINGER) out[i].end = out[i].end + LINGER
   }
-  const canvas = document.createElement('canvas')
-  canvas.width = 720
-  canvas.height = 1280
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('无法创建Canvas上下文')
-  const mainConfig = styleConfig.mainTitle
-  const mainText = styleConfig.mainTitleText || ''
-  if (!mainText) return { dataUrl: canvas.toDataURL('image/png') }
-  const alignV = mainConfig.alignV || 'top'
-  const top = mainConfig.top ?? 100
-  function calcMainHeight() {
-    const fs = mainConfig.fontSize || 48
-    const fw = mainConfig.fontWeight ?? 400
-    const fn = mainConfig.font || '黑体'
-    ctx!.font = `${fw} ${fs}px "${fn}"`
-    const bl = mainConfig.breakLength
-    const ls = bl != null && mainText.length >= bl
-      ? splitTextByBreakLength(mainText, bl) : [mainText]
-    const lh = fs * 1.2
-    const pv = mainConfig.bgPaddingV ?? fs * 0.5
-    return ls.length * lh + pv * 2
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i].end > out[i + 1].start) out[i + 1].start = out[i].end
   }
-  let mainY: number
-  if (alignV === 'top') {
-    mainY = top
-  } else if (alignV === 'bottom') {
-    mainY = 1280 - top - calcMainHeight()
-  } else {
-    mainY = (1280 - calcMainHeight()) / 2
+  if (audioEnd > 0 && out[out.length - 1].end < audioEnd) {
+    out[out.length - 1].end = audioEnd
   }
-  ctx.save()
-  const result = drawTitleBlockOnCanvas(ctx, mainText, mainConfig, 720, mainY)
-  if (styleConfig.hasSubTitle && styleConfig.subTitle && styleConfig.subTitleText) {
-    const subConfig = styleConfig.subTitle
-    const subGap = subConfig.top ?? 0
-    const subY = mainY + result.totalHeight + subGap
-    drawTitleBlockOnCanvas(ctx, styleConfig.subTitleText, subConfig, 720, subY)
-  }
-  ctx.restore()
-  return { dataUrl: canvas.toDataURL('image/png') }
+  return out
 }
 
-// Compute line segments from whisper data
+// Compute line segments from whisper data using segment-boundary snapping
 function computeLineSegmentsFromWhisper(whisperSegments: any[], fullText: string, audioDuration: number) {
   const text = fullText.trim()
   if (!text) return []
-  // If audioDuration is 0/missing, try to derive from whisper segments
   let effectiveDuration = audioDuration
   if ((!effectiveDuration || effectiveDuration <= 0) && whisperSegments?.length > 0) {
     effectiveDuration = Math.max(...whisperSegments.map(s => s.end ?? 0))
@@ -213,122 +80,72 @@ function computeLineSegmentsFromWhisper(whisperSegments: any[], fullText: string
   
   const sentences = text.split(/\n/).map(s => s.trim()).filter(s => s.length > 0)
   if (sentences.length === 0) return []
-  
-  const durationPerSentence = effectiveDuration / sentences.length
-  const wordsWithOffset: any[] = []
-  let charIdx = 0
-  
-  for (const seg of whisperSegments) {
-    if (seg.words?.length) {
-      for (const w of seg.words) {
-        const len = (w.word ?? '').length
-        wordsWithOffset.push({
-          word: w.word,
-          start: w.start,
-          end: w.end,
-          charStart: charIdx,
-          charEnd: charIdx + len,
-        })
-        charIdx += len
+
+  // Parse ASR segments
+  const segs: { text: string; start: number; end: number; chars: number }[] = []
+  for (const seg of (whisperSegments || [])) {
+    const t = (seg.text ?? '').trim()
+    const st = typeof seg.start === 'number' ? seg.start : 0
+    let en = typeof seg.end === 'number' ? seg.end : st
+    if (en < st) en = st
+    segs.push({ text: t, start: st, end: en, chars: _stripPunctCountTs(t) })
+  }
+
+  if (segs.length === 0) {
+    const per = effectiveDuration / sentences.length
+    return sentences.map((s, i) => ({ text: s, start: i * per, end: (i + 1) * per }))
+  }
+
+  const audioEnd = segs[segs.length - 1].end
+
+  // Fast path: 1:1 mapping (backend already post-processed timestamps)
+  if (segs.length === sentences.length) {
+    return segs.map((sg, i) => ({ text: sentences[i], start: sg.start, end: sg.end }))
+  }
+
+  // General case: per-segment interpolation (monotonic ordering guaranteed)
+  let totalUnits = 0
+  const timeline = segs.map(sg => {
+    const item = { su: totalUnits, eu: totalUnits + sg.chars, st: sg.start, et: sg.end }
+    totalUnits += sg.chars
+    return item
+  })
+
+  function unitToTime(unit: number): number {
+    if (unit <= 0) return timeline[0].st
+    if (unit >= totalUnits) return timeline[timeline.length - 1].et
+    for (const item of timeline) {
+      if (unit < item.eu) {
+        const span = Math.max(item.eu - item.su, 1)
+        const frac = (unit - item.su) / span
+        return item.st + frac * (item.et - item.st)
       }
-    } else {
-      const segText = (seg.text ?? '').trim()
-      const len = segText.length
-      if (len > 0) {
-        wordsWithOffset.push({
-          word: segText,
-          start: seg.start,
-          end: seg.end,
-          charStart: charIdx,
-          charEnd: charIdx + len,
-        })
-        charIdx += len
-      }
+      if (unit === item.eu) return item.et
     }
+    return timeline[timeline.length - 1].et
   }
-  
-  const whisperFullText = wordsWithOffset.map(w => w.word).join('')
-  
-  const getTimeRangeForCharRange = (charStart: number, charEnd: number) => {
-    const overlapping = wordsWithOffset.filter(w => w.charEnd > charStart && w.charStart < charEnd)
-    if (overlapping.length === 0) return null
-    return {
-      start: Math.min(...overlapping.map(w => w.start)),
-      end: Math.max(...overlapping.map(w => w.end)),
-    }
+
+  const subUnits = sentences.map(s => _stripPunctCountTs(s))
+  const subTotal = subUnits.reduce((a, b) => a + b, 0)
+
+  if (subTotal === 0 || totalUnits === 0) {
+    const per = effectiveDuration / sentences.length
+    return sentences.map((s, i) => ({ text: s, start: i * per, end: (i + 1) * per }))
   }
-  
-  const normToRaw = (normIdx: number, normText: string) => {
-    let n = 0
-    for (const w of wordsWithOffset) {
-      const wNorm = w.word.replace(/\s/g, '').length
-      if (n + wNorm > normIdx) return w.charStart + (normIdx - n)
-      n += wNorm
-    }
-    return normText.length
+
+  const out: { text: string; start: number; end: number }[] = []
+  let cursor = 0
+  for (let idx = 0; idx < sentences.length; idx++) {
+    const startPos = cursor / subTotal * totalUnits
+    cursor += subUnits[idx]
+    const endPos = cursor / subTotal * totalUnits
+    let st = unitToTime(startPos)
+    let et = unitToTime(endPos)
+    if (et <= st) et = st + 0.01
+    out.push({ text: sentences[idx], start: st, end: et })
   }
-  
-  const sentNormLengths = sentences.map(s => s.replace(/\s/g, '').length)
-  const totalSentNorm = sentNormLengths.reduce((a, b) => a + b, 0) || 1
-  const whisperNormText = whisperFullText.replace(/\s/g, '')
-  const whisperNormLen = whisperNormText.length
-  
-  const startTimes: number[] = []
-  const endTimes: number[] = []
-  
-  for (let i = 0; i < sentences.length; i++) {
-    let startTime: number
-    let endTime: number
-    
-    if (whisperSegments.length > 0 && wordsWithOffset.length > 0 && whisperFullText.length > 0 && whisperNormLen > 0) {
-      const prevNorm = sentNormLengths.slice(0, i).reduce((a, b) => a + b, 0)
-      const sentNormLen = sentNormLengths[i]
-      const ratioStart = prevNorm / totalSentNorm
-      const ratioEnd = (prevNorm + sentNormLen) / totalSentNorm
-      const normStart = Math.min(Math.floor(ratioStart * whisperNormLen), whisperNormLen - 1)
-      const normEnd = Math.min(Math.ceil(ratioEnd * whisperNormLen), whisperNormLen)
-      const charStart = normToRaw(normStart, whisperNormText)
-      const charEnd = normToRaw(normEnd, whisperNormText)
-      const range = getTimeRangeForCharRange(charStart, charEnd)
-      
-      if (range) {
-        startTime = range.start
-        endTime = range.end
-      } else {
-        const fallback = getTimeRangeForCharRange(charStart, charStart + 1)
-        startTime = fallback?.start ?? i * durationPerSentence
-        endTime = fallback ? Math.min(fallback.end + 0.5, effectiveDuration) : Math.min((i + 1) * durationPerSentence, effectiveDuration)
-      }
-    } else if (whisperSegments.length > 0) {
-      const base = whisperSegments[whisperSegments.length - 1].end
-      const extra = i - whisperSegments.length
-      const totalExtra = Math.max(1, sentences.length - whisperSegments.length)
-      const extraDuration = Math.max(0, effectiveDuration - base) / totalExtra
-      startTime = i < whisperSegments.length ? whisperSegments[i].start : base + extra * extraDuration
-      endTime = i < whisperSegments.length ? whisperSegments[i].end : base + (extra + 1) * extraDuration
-    } else {
-      startTime = i * durationPerSentence
-      endTime = Math.min((i + 1) * durationPerSentence, effectiveDuration)
-    }
-    
-    startTimes.push(startTime)
-    endTimes.push(endTime)
-  }
-  
-  // Ensure no overlap
-  for (let i = 0; i < sentences.length - 1; i++) {
-    if (endTimes[i] >= startTimes[i + 1]) {
-      const mid = (endTimes[i] + startTimes[i + 1]) / 2
-      endTimes[i] = mid - 0.01
-      startTimes[i + 1] = mid + 0.01
-    }
-  }
-  
-  return sentences.map((text, i) => ({
-    text,
-    start: startTimes[i],
-    end: endTimes[i],
-  }))
+
+  return out
 }
 
 // Fetch whisper segments from cloud
@@ -345,7 +162,7 @@ export function useApplyAllEffects() {
       const {
         originalVideoPath,
         generatedVideoPath,
-        smartCutVideoPath,
+        smartCutBaseVideoPath,
         uploadedBgms,
         builtinBgms,
         subtitleEnabled,
@@ -361,7 +178,7 @@ export function useApplyAllEffects() {
         setWhisperSegments,
       } = store
 
-      const baseVideoPath = smartCutVideoPath || originalVideoPath || generatedVideoPath
+      const baseVideoPath = smartCutBaseVideoPath || originalVideoPath || generatedVideoPath
       
       if (!baseVideoPath) {
         showToast?.('请先生成视频或选择视频文件', 'info')
@@ -377,9 +194,13 @@ export function useApplyAllEffects() {
       const skipBgm = skip ? skip.bgm : !bgmEnabled
       const hasBgm = !skipBgm && !!bgmEffectConfig?.selectedBgmId
 
+      console.log('[applyAllEffects] hasTitle:', hasTitle, 'hasSubtitle:', hasSubtitle, 'hasBgm:', hasBgm,
+        'skipBgm:', skipBgm, 'bgmEnabled:', bgmEnabled, 'bgmEffectConfig:', bgmEffectConfig,
+        'subtitleEffectConfig?.text:', !!subtitleEffectConfig?.text,
+        'audioDuration:', audioDuration, 'hasWhisperFallback:', hasWhisperFallback, 'hasAudioPathFallback:', hasAudioPathFallback)
 
       if (!hasSubtitle && !hasTitle && !hasBgm) {
-        const base = smartCutVideoPath || originalVideoPath || generatedVideoPath
+        const base = smartCutBaseVideoPath || originalVideoPath || generatedVideoPath
         if (base) {
           try {
             const result = await (window as any).api?.getLocalFileUrl?.(base)
@@ -390,6 +211,7 @@ export function useApplyAllEffects() {
             console.error('Failed to load video:', e)
           }
         }
+        showToast?.('没有可应用的效果（请检查字幕/标题/BGM配置）', 'info')
         return
       }
 
@@ -407,7 +229,7 @@ export function useApplyAllEffects() {
           
           store.setProcessingProgress?.(10)
           
-          const combinedResult = await generateCombinedTitleImage({
+          const combinedResult = await _generateCombinedTitleImageForVideo({
             mainTitle: currentTitleStyle.mainTitle || {
               font: '黑体',
               fontSize: 48,
@@ -422,7 +244,9 @@ export function useApplyAllEffects() {
             hasSubTitle: currentTitleStyle.hasSubTitle || false,
             mainTitleText,
             subTitleText,
-          })
+            customPosX: titleEffectConfig.customPosX ?? null,
+            customPosY: titleEffectConfig.customPosY ?? null,
+          }, baseVideoPath)
           
           store.setProcessingProgress?.(30)
           
@@ -440,6 +264,7 @@ export function useApplyAllEffects() {
               mainTitle: currentTitleStyle.mainTitle,
               subTitle: currentTitleStyle.subTitle,
               combinedImage: true,
+              nativeResolution: combinedResult.nativeResolution,
               ...(rangeOk ? { startTime: titleSegmentRange.start, endTime: titleSegmentRange.end } : {}),
             }
           )
@@ -460,24 +285,39 @@ export function useApplyAllEffects() {
           
           store.setProcessingProgress?.(50)
           const subtitleInputPath = currentVideoPath
-          
-          let effectiveWhisperSegments = whisperSegments
-          if (!effectiveWhisperSegments?.length && generatedAudioPath && subCfg.text?.trim()) {
+          const subtitleAlignText = (subCfg.text ?? '').trim()
+
+          await ensureWhisperSegmentsIfNeeded({ subtitleText: subtitleAlignText })
+          let effectiveWhisperSegments = useVideoPageStore.getState().whisperSegments
+          if (!effectiveWhisperSegments?.length && generatedAudioPath && subtitleAlignText) {
             try {
               store.setProcessingProgress?.(52)
-              const fetchPromise = fetchWhisperSegmentsFromCloud(generatedAudioPath, subCfg.text.trim())
+              const fetchPromise = fetchWhisperSegmentsFromCloud(generatedAudioPath, subtitleAlignText)
               const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Whisper fetch timeout')), 15000))
               const segments = await Promise.race([fetchPromise, timeoutPromise]) as any[]
               if (segments?.length) {
                 effectiveWhisperSegments = segments
                 setWhisperSegments?.(segments)
+                useVideoPageStore.getState().setWhisperAlignedSubtitleText(subtitleAlignText)
               }
             } catch (err) {
               console.log('剩辑流程补齐 Whisper 字幕时间戳失败(将使用均匀分配):', err)
             }
           }
           
-          const lineSegments = computeLineSegmentsFromWhisper(effectiveWhisperSegments || [], subCfg.text, audioDuration)
+          const subtitleText = subCfg.text
+          const lineCount = subtitleText?.split(/\n/).map(s => s.trim()).filter(s => s.length > 0).length ?? 0
+          console.log('[applyAllEffects subtitle] whisperSegments:', effectiveWhisperSegments?.length,
+            'subtitleLines:', lineCount, 'audioDuration:', audioDuration,
+            'countMatch:', effectiveWhisperSegments?.length === lineCount)
+          if (effectiveWhisperSegments?.length) {
+            console.log('[applyAllEffects subtitle] first whisper seg:', JSON.stringify(effectiveWhisperSegments[0]))
+            console.log('[applyAllEffects subtitle] last whisper seg:', JSON.stringify(effectiveWhisperSegments[effectiveWhisperSegments.length - 1]))
+          }
+          const lineSegments = computeLineSegmentsFromWhisper(effectiveWhisperSegments || [], subtitleText, audioDuration)
+          console.log('[applyAllEffects subtitle] computed lineSegments:', lineSegments.length,
+            lineSegments.length > 0 ? `first: ${lineSegments[0].start.toFixed(2)}-${lineSegments[0].end.toFixed(2)}` : '',
+            lineSegments.length > 1 ? `last: ${lineSegments[lineSegments.length-1].start.toFixed(2)}-${lineSegments[lineSegments.length-1].end.toFixed(2)}` : '')
           
           if (lineSegments.length > 0) {
             store.setProcessingProgress?.(55)

@@ -3,6 +3,28 @@ import { spawn, exec } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
+// 内联字体别名映射，避免 bytecode 分包后 title-font-map 导入失效
+const TITLE_FONT_FILE_STEM_TO_FAMILY: Record<string, string> = {
+  heiti: '黑体',
+  kaiti: '楷体',
+  lishu: '隶书',
+  hyetht: '汉仪鹅头宋繁体',
+  chunfeng: '字体家ai造字春风',
+  guoxiang: '国祥手写体',
+  sanji: '三极泼墨体',
+  shishang: '时尚中黑简体',
+  fangzheng: '方正粗谭黑简体',
+}
+
+function fontFamilyAliases(fileStem: string): string[] {
+  const stem = fileStem.trim()
+  if (!stem) return []
+  const lower = stem.toLowerCase()
+  const mapped = TITLE_FONT_FILE_STEM_TO_FAMILY[lower]
+  const aliases = mapped ? [stem, mapped] : [stem]
+  return [...new Set(aliases)]
+}
+
 const REF_W = 720
 const REF_H = 1280
 
@@ -295,25 +317,25 @@ export function loadFontsFromDir(fontsDir: string): void {
     const ext = path.extname(file).toLowerCase()
     if (!FONT_EXTS.includes(ext)) continue
     const filePath = path.join(fontsDir, file)
-    const familyName = path.basename(file, ext)
-    try {
-      GlobalFonts.registerFromPath(filePath, familyName)
-      console.log('[Fonts] Registered font:', familyName, 'from', filePath)
-      loadedCount++
-    } catch (err) {
-      console.error('[Fonts] Failed to register font:', familyName, err)
+    const fileStem = path.basename(file, ext)
+    const aliases = fontFamilyAliases(fileStem)
+    let fileRegistered = false
+    for (const familyName of aliases) {
+      try {
+        if (typeof GlobalFonts.registerFromPath !== 'function') {
+          throw new Error('GlobalFonts.registerFromPath unavailable')
+        }
+        GlobalFonts.registerFromPath(filePath, familyName)
+        console.log('[Fonts] Registered font:', familyName, 'from', filePath)
+        fileRegistered = true
+      } catch (err) {
+        console.error('[Fonts] Failed to register font:', familyName, 'from', filePath, err)
+      }
     }
+    if (fileRegistered) loadedCount++
   }
   
   console.log('[Fonts] Total fonts loaded:', loadedCount)
-  
-  // Log all registered font families
-  try {
-    const families = GlobalFonts.families
-    console.log('[Fonts] All registered families:', JSON.stringify(families.map((f: any) => f.family)))
-  } catch (e) {
-    console.log('[Fonts] Could not list families')
-  }
   
   fontsLoaded = true
 }

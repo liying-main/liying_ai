@@ -10,7 +10,6 @@ import { useToast } from '../../hooks/useToast'
 import { usePhoneModal } from '../../hooks/usePhoneModal'
 import { AiLegalModal } from '../../components/AiLegalModal'
 import { PhoneModal } from '../../components/PhoneModal'
-import { useAd } from '../../components/AdContext'
 
 // API Services
 import { llmService } from '../../api/llm'
@@ -70,7 +69,6 @@ function formatTime$1(seconds: number): string {
 }
 
 export function VideoAudioCard() {
-  const { openAd } = useAd();
   const showToast = useToast();
   const userInfo = useUserInfoStore((s) => s.userInfo);
   const autoFlowStep = useVideoPageStore((s) => s.autoFlowStep);
@@ -125,6 +123,13 @@ export function VideoAudioCard() {
   const [isTtsQueuing, setIsTtsQueuing] = useState(false);
   const isTtsQueueingRef = useRef(false);
   const ttsStartTimeRef = useRef(0);
+  const [ttsProgressTick, setTtsProgressTick] = useState(0);
+  const ttsHasBackendProgressRef = useRef(false);
+  useEffect(() => {
+    if (!isTextToAudioing) return;
+    const timer = setInterval(() => setTtsProgressTick((v) => v + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isTextToAudioing]);
   useEffect(() => {
     if (typeof window.api.onPluginProxyProgress !== "function") return;
     const off = window.api.onPluginProxyProgress((data) => {
@@ -133,10 +138,22 @@ export function VideoAudioCard() {
         isTtsQueueingRef.current = true;
         setIsTtsQueuing(true);
       } else if (data.type === "queue_active" || data.type === "queue_done") {
-        ttsStartTimeRef.current = Date.now();
         isTtsQueueingRef.current = false;
         setIsTtsQueuing(false);
-        setTextToAudioProgress(0);
+        if (data.type === "queue_done") ttsHasBackendProgressRef.current = false;
+      } else if (data.type === "job_progress") {
+        const pg = Math.max(0, Math.min(100, Number(data.progress || 0)));
+        const state = String(data.state || "");
+        if (pg > 0) {
+          if (state === "running" || state === "succeeded") {
+            ttsHasBackendProgressRef.current = true;
+            if (textToAudioIntervalRef.current) {
+              clearInterval(textToAudioIntervalRef.current);
+              textToAudioIntervalRef.current = null;
+            }
+          }
+          setTextToAudioProgress((prev) => Math.max(prev, pg));
+        }
       }
     });
     return off;
@@ -188,9 +205,6 @@ export function VideoAudioCard() {
     setReferenceAudioPromptText(selectedVoice?.promptText ?? "");
   };
   const handleUploadAudio = async (event) => {
-    openAd();
-  };
-  const _handleUploadAudio_disabled = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const ext = file.name.toLowerCase().split(".").pop();
@@ -261,9 +275,6 @@ export function VideoAudioCard() {
   };
   const isCustomTtsEmotion = ttsEmotion === TTS_EMOTION_CUSTOM_VALUE;
   const handleTextToAudio = async () => {
-    openAd();
-  };
-  const _handleTextToAudio_disabled = async () => {
     if (isTextToAudioing) return;
     const scriptContent =
       showTranslatedInTextarea && translatedText
@@ -291,18 +302,19 @@ export function VideoAudioCard() {
     setAudioDuration(0);
     setIsTextToAudioing(true);
     setTextToAudioProgress(0);
+    ttsHasBackendProgressRef.current = false;
     setAudioPreview("");
     ttsStartTimeRef.current = Date.now();
     const estimatedDuration = 6e4;
     textToAudioIntervalRef.current = setInterval(() => {
-      if (isTtsQueueingRef.current) return;
+      if (ttsHasBackendProgressRef.current) return;
       const progress = Math.min(
         Math.round(
           ((Date.now() - ttsStartTimeRef.current) / estimatedDuration) * 90,
         ),
         90,
       );
-      setTextToAudioProgress(progress);
+      setTextToAudioProgress((prev) => Math.max(prev, progress));
     }, 200);
     const traceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (userInfo?.phone) {
@@ -389,7 +401,7 @@ export function VideoAudioCard() {
       console.error("Text to audio failed:", error);
       const err = error;
       if (err.message?.includes("fetch failed"))
-        showToast("请联系客服人员，激活账号", "error");
+        showToast("连接试用节点失败，请检查网络后重试", "error");
       else showToast(`语音生成失败: ${err.message || "未知错误"}`, "error");
       if (userInfo?.phone) {
         exceptionService.submitException({
@@ -424,6 +436,14 @@ export function VideoAudioCard() {
       showToast(`保存失败: ${err.message || "未知错误"}`, "error");
     }
   };
+  const ttsElapsedSec =
+    isTextToAudioing && ttsStartTimeRef.current
+      ? Math.max(0, Math.floor((Date.now() - ttsStartTimeRef.current) / 1000))
+      : 0;
+  const ttsElapsedText = `${Math.floor(ttsElapsedSec / 60)}:${(ttsElapsedSec % 60)
+    .toString()
+    .padStart(2, "0")}`;
+  void ttsProgressTick;
   const autoLoading =
     (autoFlowRunning && autoFlowStep === "audio") ||
     (flowMode === "manual" && isTextToAudioing);
@@ -473,14 +493,22 @@ export function VideoAudioCard() {
                   }),
                   jsxRuntimeExports.jsx("div", {
                     className: "video-select-upload-row__upload",
-                    children: jsxRuntimeExports.jsx("div", {
-                      className: "video-file-input video-file-input-wrap",
-                      onClick: () => openAd(),
-                      style: { cursor: "pointer" },
-                      children: jsxRuntimeExports.jsx("span", {
-                        className: "video-file-input-text",
-                        children: "上传",
-                      }),
+                    children: jsxRuntimeExports.jsxs("div", {
+                      className: `video-file-input video-file-input-wrap ${isUploadingVoice ? "disabled" : ""}`,
+                      children: [
+                        jsxRuntimeExports.jsx("span", {
+                          className: "video-file-input-text",
+                          children: voiceUploadText,
+                        }),
+                        jsxRuntimeExports.jsx("input", {
+                          type: "file",
+                          accept:
+                            "audio/wav,audio/mpeg,audio/mp3,audio/mp4,.wav,.mp3,.m4a",
+                          className: "video-file-input-real",
+                          onChange: handleUploadAudio,
+                          disabled: isUploadingVoice,
+                        }),
+                      ],
                     }),
                   }),
                 ],
@@ -489,6 +517,11 @@ export function VideoAudioCard() {
                 jsxRuntimeExports.jsx("span", {
                   className: "video-hint",
                   children: "正在上传并整理声音素材...",
+                }),
+              !builtinVoices.length && !uploadedVoices.length &&
+                jsxRuntimeExports.jsx("span", {
+                  className: "video-hint",
+                  children: "当前没有可用音色，请导入你有权使用的 WAV、MP3 或 M4A 参考音频。导入只保存到本机，生成时才发送给所选服务。",
                 }),
             ],
           }),
@@ -695,23 +728,23 @@ export function VideoAudioCard() {
               jsxRuntimeExports.jsxs("button", {
                 onClick: handleTextToAudio,
                 disabled: isTextToAudioing,
-                className: "video-button video-button-primary",
+                className: `video-button video-button-primary ${isTextToAudioing ? "video-button-progress-active" : ""}`,
                 children: [
                   jsxRuntimeExports.jsxs("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("path", { d: "M9 18V5l12-2v13" }), jsxRuntimeExports.jsx("circle", { cx: "6", cy: "18", r: "3" }), jsxRuntimeExports.jsx("circle", { cx: "18", cy: "16", r: "3" })] }),
                   isTextToAudioing
                     ? isTtsQueuing
-                      ? "排队中..."
-                      : `生成中 ${textToAudioProgress}%`
+                      ? `排队中 ${Math.max(textToAudioProgress, 8)}% · ${ttsElapsedText}`
+                      : `生成中 ${textToAudioProgress}% · ${ttsElapsedText}`
                     : "克隆声音",
                 ],
               }),
               isTextToAudioing &&
                 jsxRuntimeExports.jsx("div", {
-                  className: "video-progress",
+                  className: `video-progress ${isTextToAudioing ? "video-progress--active" : ""} ${isTtsQueuing ? "video-progress--indeterminate" : ""}`,
                   children: jsxRuntimeExports.jsx("div", {
-                    className: "video-progress-bar",
+                    className: `video-progress-bar ${isTextToAudioing ? "video-progress-bar--active" : ""}`,
                     style: {
-                      width: `${isTtsQueuing ? 0 : textToAudioProgress}%`,
+                      width: `${Math.max(isTtsQueuing ? 8 : 0, textToAudioProgress)}%`,
                     },
                   }),
                 }),

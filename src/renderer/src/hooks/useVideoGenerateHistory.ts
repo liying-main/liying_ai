@@ -2,153 +2,108 @@
 /* eslint-disable */
 import { useState, useCallback, useEffect } from 'react'
 import { useVideoPageStore } from '../store/VideoPageStore'
+import { useVideoWorksHistoryStore } from '../store/VideoWorksHistoryStore'
 import { useToast } from './useToast'
 
-const HISTORY_MAX = 50
-
-function buildSnapshotFromStore(overrides?: any) {
-  const state = useVideoPageStore.getState() as any
-  const labelSource =
-    state.mainTitle ||
-    state.viralTitle ||
-    (state.rewrittenScript?.slice(0, 30) ?? '') ||
-    '未命名'
-  const label = labelSource.length > 40 ? labelSource.slice(0, 40) + '…' : labelSource
-  return {
-    id: String(Date.now()),
-    createdAt: Date.now(),
-    label: overrides?.label ?? label,
-    originalVideoPath: overrides?.originalVideoPath ?? state.originalVideoPath ?? '',
-    generatedVideoPath: overrides?.generatedVideoPath ?? state.generatedVideoPath ?? '',
-    generatedAudioPath: state.generatedAudioPath ?? '',
-    audioDuration: state.audioDuration ?? 0,
-    rewrittenScript: state.rewrittenScript ?? '',
-    translatedText: state.translatedText ?? '',
-    mainTitle: state.mainTitle ?? '',
-    viralTitle: state.viralTitle ?? '',
-    subTitle: state.subTitle ?? '',
-    videoTags: state.videoTags ?? '',
-    subtitleText: state.subtitleText ?? '',
-    whisperSegments: state.whisperSegments ?? [],
-    titledVideoPath: state.titledVideoPath ?? '',
-    subtitledVideoPath: state.subtitledVideoPath ?? '',
-    bgmedVideoPath: state.bgmedVideoPath ?? '',
-    smartCutVideoPath: state.smartCutVideoPath ?? '',
-    finalVideoPath: state.finalVideoPath ?? '',
-    titleEffectConfig: state.titleEffectConfig ?? null,
-    selectedTitleStyleId: state.selectedTitleStyleId ?? '',
-    selectedVoiceId: state.selectedVoiceId ?? '',
-    subtitleEffectConfig: state.subtitleEffectConfig ?? null,
-    bgmEffectConfig: state.bgmEffectConfig ?? null,
-    titleSegmentRange: state.titleSegmentRange ?? null,
-    subtitleEnabled: state.subtitleEnabled ?? true,
-    bgmEnabled: state.bgmEnabled ?? true,
+async function resolvePreviewUrl(item: any) {
+  const path =
+    item.finalVideoPath ||
+    item.smartCutVideoPath ||
+    item.bgmedVideoPath ||
+    item.subtitledVideoPath ||
+    item.titledVideoPath ||
+    item.generatedVideoPath ||
+    item.originalVideoPath
+  if (!path) return ''
+  try {
+    const res = await (window as any).api?.getLocalFileUrl?.(path)
+    return res?.success && res.url ? res.url : ''
+  } catch {
+    return ''
   }
 }
 
 export function useVideoGenerateHistory() {
   const showToast = useToast()
   const [showHistoryModal, setShowHistoryModal] = useState(false)
-  const [historyList, setHistoryList] = useState([])
 
-  const refreshHistoryList = useCallback(async () => {
-    try {
-      const list = await (window as any).api?.getVideoGenerateHistory?.()
-      setHistoryList((list ?? []).slice().reverse())
-    } catch (e) {
-      console.error('Failed to refresh history list:', e)
-    }
-  }, [])
+  const historyList = useVideoWorksHistoryStore((s) => s.historyList)
+  const loading = useVideoWorksHistoryStore((s) => s.loading)
+  const refreshHistoryList = useVideoWorksHistoryStore((s) => s.refreshHistoryList)
+  const saveNewSnapshot = useVideoWorksHistoryStore((s) => s.saveNewSnapshot)
+  const updateLatestSnapshot = useVideoWorksHistoryStore((s) => s.updateLatestSnapshot)
+  const deleteSnapshotFromStore = useVideoWorksHistoryStore((s) => s.deleteSnapshot)
 
   useEffect(() => {
     if (showHistoryModal) refreshHistoryList()
   }, [showHistoryModal, refreshHistoryList])
 
-  const saveNewSnapshot = useCallback(async (params: any) => {
-    try {
-      const item = {
-        id: Date.now().toString(),
-        createdAt: Date.now(),
-        ...params,
-      }
-      const list = await (window as any).api?.getVideoGenerateHistory?.() || []
-      const arr = Array.isArray(list) ? list : []
-      arr.push(item)
-      const trimmed = arr.length > HISTORY_MAX ? arr.slice(-HISTORY_MAX) : arr
-      await (window as any).api?.setVideoGenerateHistory?.(trimmed)
-      useVideoPageStore.getState().setVideoHistoryCurrentId?.(item.id)
-      useVideoPageStore.getState().setVideoHistoryCurrentCreatedAt?.(item.createdAt)
-      return item
-    } catch (e) {
-      console.error('Failed to save snapshot:', e)
-      return null
-    }
-  }, [])
-
-  const restoreSnapshot = useCallback(async (item: any) => {
+  const loadHistoryItem = useCallback(async (item: any) => {
     if (!item) return
     const store = useVideoPageStore.getState()
-    // Restore various fields from snapshot
-    if (item.generatedVideoPreview) store.setGeneratedVideoPreview?.(item.generatedVideoPreview)
-    if (item.originalVideoPath) store.setOriginalVideoPath?.(item.originalVideoPath)
-    if (item.generatedVideoPath) store.setGeneratedVideoPath?.(item.generatedVideoPath)
-    if (item.rewrittenScript) store.setRewrittenScript?.(item.rewrittenScript)
-    if (item.translatedText) store.setTranslatedText?.(item.translatedText)
-    if (item.mainTitle) store.setMainTitle?.(item.mainTitle)
-    if (item.subTitle) store.setSubTitle?.(item.subTitle)
-    if (item.viralTitle) store.setViralTitle?.(item.viralTitle)
-    if (item.videoTags) store.setVideoTags?.(item.videoTags)
-    if (item.generatedAudioPath) store.setGeneratedAudioPath?.(item.generatedAudioPath)
-    if (item.audioDuration) store.setAudioDuration?.(item.audioDuration)
-    if (item.subtitleText) store.setSubtitleText?.(item.subtitleText)
-    if (item.whisperSegments) store.setWhisperSegments?.(item.whisperSegments)
-    store.setVideoHistoryCurrentId?.(item.id)
-    store.setVideoHistoryCurrentCreatedAt?.(item.createdAt)
-    showToast?.('已恢复历史记录', 'success')
+    store.setOriginalVideoPath?.(item.originalVideoPath ?? '')
+    store.setGeneratedVideoPath?.(item.generatedVideoPath ?? '')
+    store.setRewrittenScript?.(item.rewrittenScript ?? '')
+    store.setTranslatedText?.(item.translatedText ?? '')
+    store.setMainTitle?.(item.mainTitle ?? '')
+    store.setSubTitle?.(item.subTitle ?? '')
+    store.setViralTitle?.(item.viralTitle ?? '')
+    store.setVideoTags?.(item.videoTags ?? '')
+    store.setGeneratedAudioPath?.(item.generatedAudioPath ?? '')
+    store.setAudioDuration?.(item.audioDuration ?? 0)
+    store.setSubtitleText?.(item.subtitleText ?? '')
+    store.setWhisperSegments?.(item.whisperSegments ?? [])
+    store.setTitledVideoPath?.(item.titledVideoPath ?? '')
+    store.setSubtitledVideoPath?.(item.subtitledVideoPath ?? '')
+    store.setBgmedVideoPath?.(item.bgmedVideoPath ?? '')
+    store.setSmartCutVideoPath?.(item.smartCutVideoPath ?? '')
+    store.setSmartCutBaseVideoPath?.(item.smartCutBaseVideoPath ?? '')
+    store.setFinalVideoPath?.(item.finalVideoPath ?? '')
+    store.setTitleEffectConfig?.(item.titleEffectConfig ?? null)
+    store.setSelectedTitleStyleId?.(item.selectedTitleStyleId ?? '')
+    store.setSelectedVoiceId?.(item.selectedVoiceId ?? '')
+    store.setSubtitleEffectConfig?.(item.subtitleEffectConfig ?? null)
+    store.setBgmEffectConfig?.(item.bgmEffectConfig ?? null)
+    store.setMixSegments?.(item.mixSegments ?? [])
+    store.setPipSegments?.(item.pipSegments ?? [])
+    store.setPipRect?.(item.pipRect ?? null)
+    store.setMainVideoRect?.(item.mainVideoRect ?? { x: 0, y: 0, width: 100, height: 100 })
+    store.setMainVideoBgColor?.(item.mainVideoBgColor ?? '#000000')
+    store.setMainVideoZIndex?.(item.mainVideoZIndex ?? 0)
+    store.setAlreadySubtitled?.(item.alreadySubtitled ?? false)
+    store.setAlreadyBgmAdded?.(item.alreadyBgmAdded ?? false)
+    store.setSubtitleEnabled?.(item.subtitleEnabled ?? true)
+    store.setBgmEnabled?.(item.bgmEnabled ?? true)
+    store.setTitleSegmentRange?.(item.titleSegmentRange ?? null)
+    store.setBgmSegmentRange?.(item.bgmSegmentRange ?? null)
+    store.setVideoHistoryCurrentId?.(item.id ?? '')
+    store.setVideoHistoryCurrentCreatedAt?.(item.createdAt ?? 0)
+    store.setGeneratedVideoPreview?.(await resolvePreviewUrl(item))
+    setShowHistoryModal(false)
+    showToast?.('已加载该历史视频', 'success')
   }, [showToast])
 
-  const deleteSnapshot = useCallback(async (id: string) => {
+  const deleteSnapshot = useCallback(async (id: string, event?: any) => {
+    event?.stopPropagation?.()
+    event?.preventDefault?.()
+    if (!id) return
     try {
-      const list = await (window as any).api?.getVideoGenerateHistory?.() || []
-      const filtered = list.filter((item: any) => item.id !== id)
-      await (window as any).api?.setVideoGenerateHistory?.(filtered)
-      await refreshHistoryList()
+      await deleteSnapshotFromStore(id)
       showToast?.('已删除历史记录', 'success')
     } catch (e) {
       console.error('Failed to delete snapshot:', e)
+      showToast?.('删除失败', 'error')
     }
-  }, [refreshHistoryList, showToast])
-
-  const updateLatestSnapshot = useCallback(async () => {
-    try {
-      const state = useVideoPageStore.getState()
-      if (!state.originalVideoPath) return
-      const list = await (window as any).api?.getVideoGenerateHistory?.()
-      const arr = Array.isArray(list) ? list : []
-      if (arr.length === 0) return
-      const currentId = state.videoHistoryCurrentId
-      const currentCreatedAt = state.videoHistoryCurrentCreatedAt
-      if (!currentId || !currentCreatedAt) return
-      const idx = arr.findIndex((i: any) => i.id === currentId)
-      if (idx < 0) return
-      const item = buildSnapshotFromStore()
-      item.id = currentId
-      item.createdAt = currentCreatedAt
-      arr[idx] = item
-      const res = await (window as any).api?.setVideoGenerateHistory?.(arr)
-      if (res && !res.success) console.error('updateLatestSnapshot failed', res.error)
-    } catch (e) {
-      console.error('Failed to update latest snapshot:', e)
-    }
-  }, [])
+  }, [deleteSnapshotFromStore, showToast])
 
   return {
     showHistoryModal,
     setShowHistoryModal,
     historyList,
+    loading,
     refreshHistoryList,
     saveNewSnapshot,
-    restoreSnapshot,
+    loadHistoryItem,
     deleteSnapshot,
     updateLatestSnapshot,
   }

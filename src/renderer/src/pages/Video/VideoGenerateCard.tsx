@@ -11,7 +11,7 @@ import { VideoFirstFrameSelect } from './VideoSharedComponents'
 import { usePhoneModal } from '../../hooks/usePhoneModal'
 import { AiLegalModal } from '../../components/AiLegalModal'
 import { PhoneModal } from '../../components/PhoneModal'
-import { useAd } from '../../components/AdContext'
+import { generateCombinedTitleImage as buildCombinedTitleImage } from '../../utils/titleCanvasRenderer'
 
 // API Services
 import { llmService } from '../../api/llm'
@@ -43,8 +43,26 @@ async function fetchWhisperSegmentsFromCloud(audioPath: string, subtitle: string
   return window.api.pluginProxyWhisperAlignRun({ audioPath, subtitle })
 }
 
+function formatVideoElapsed(seconds: number) {
+  const safe = Math.max(0, Math.floor(Number(seconds || 0)));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function videoStageLabel(stage: string, state = "") {
+  const value = String(stage || state || "");
+  if (value === "uploading") return "上传素材";
+  if (value === "uploaded") return "提交任务";
+  if (value === "submitted") return "等待云端";
+  if (value === "queued") return "云端排队";
+  if (value === "running" || value === "rendering") return "云端生成";
+  if (value === "succeeded") return "下载成片";
+  if (value === "retry") return "下载重试";
+  return "生成中";
+}
+
 export function VideoGenerateCard() {
-  const { openAd } = useAd();
   const showToast = useToast();
   const phoneModal = usePhoneModal(false);
   const autoFlowStep = useVideoPageStore((s) => s.autoFlowStep);
@@ -84,6 +102,43 @@ export function VideoGenerateCard() {
   const [isVideoQueuing, setIsVideoQueuing] = useState(false);
   const isVideoQueueingRef = useRef(false);
   const videoStartTimeRef = useRef(0);
+  const [videoProgressTick, setVideoProgressTick] = useState(0);
+  const [videoPhaseText, setVideoPhaseText] = useState("准备素材");
+  // Segment-level job info from backend (new segment-scheduling worker).
+  // Null when legacy worker or before first poll.
+  const [videoJobInfo, setVideoJobInfo] = useState<any>(null);
+  const hasBackendProgressRef = useRef(false);
+  const maxProgressRef = useRef(0);
+  // Download phase (server -> local) state
+  const [videoDownloadInfo, setVideoDownloadInfo] = useState<null | {
+    phase: 'start' | 'progress' | 'done' | 'retry' | 'error';
+    percent: number;
+    loaded: number;
+    total: number;
+    speedBps: number;
+    attempt: number;
+  }>(null);
+  useEffect(() => {
+    if (typeof window.api.onVideoDownloadProgress !== "function") return;
+    const off = window.api.onVideoDownloadProgress((data) => {
+      setVideoDownloadInfo({
+        phase: data.phase,
+        percent: Number(data.percent || 0),
+        loaded: Number(data.loaded || 0),
+        total: Number(data.total || 0),
+        speedBps: Number(data.speedBps || 0),
+        attempt: Number(data.attempt || 1),
+      });
+      if (data.phase === "retry") setVideoPhaseText("下载重试");
+      else if (data.phase === "start" || data.phase === "progress") setVideoPhaseText("下载成片");
+    });
+    return off;
+  }, []);
+  useEffect(() => {
+    if (!isGeneratingVideo) return;
+    const timer = setInterval(() => setVideoProgressTick((v) => v + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isGeneratingVideo]);
   useEffect(() => {
     if (typeof window.api.onPluginProxyProgress !== "function") return;
     const off = window.api.onPluginProxyProgress((data) => {
@@ -91,11 +146,83 @@ export function VideoGenerateCard() {
       if (data.type === "queue_waiting") {
         isVideoQueueingRef.current = true;
         setIsVideoQueuing(true);
+        setVideoPhaseText("排队中");
       } else if (data.type === "queue_active" || data.type === "queue_done") {
-        videoStartTimeRef.current = Date.now();
         isVideoQueueingRef.current = false;
         setIsVideoQueuing(false);
-        setGenerateVideoProgress(0);
+        if (data.type === "queue_active") {
+          setGenerateVideoProgress((prev) => Math.max(prev, 8));
+          setVideoPhaseText((prev) =>
+            prev === "上传素材" || prev === "提交任务" ? prev : "准备素材",
+          );
+        } else {
+          setGenerateVideoProgress((prev) => (prev >= 100 ? 90 : prev));
+          setVideoPhaseText("整理结果");
+        }
+        if (data.type === "queue_done") {
+          setVideoJobInfo(null);
+          hasBackendProgressRef.current = false;
+          maxProgressRef.current = 0;
+        }
+      } else if (data.type === "job_warning") {
+        if (data.warning) showToast(data.warning, "info");
+      } else if (data.type === "job_progress") {
+        setVideoPhaseText(videoStageLabel(data.stage, data.state));
+        const stage = String(data.stage || data.state || "");
+        const isGpuStage =
+          stage === "running" ||
+          stage === "rendering" ||
+          stage === "succeeded" ||
+          Number(data.totalSegments || 0) > 0;
+        const total = Number(data.totalSegments || 0);
+        if (total > 0) {
+          hasBackendProgressRef.current = true;
+          if (generateVideoIntervalRef.current) {
+            clearInterval(generateVideoIntervalRef.current);
+            generateVideoIntervalRef.current = null;
+          }
+          const completed = Number(data.completedSegments || 0);
+          const currentSeg = data.currentSegment || null;
+          const currentProgress = currentSeg
+            ? Number(currentSeg.progress || 0) / 100
+            : 0;
+          let pg = Math.round(((completed + currentProgress) / total) * 100);
+          if (String(data.state || "") === "running" && pg >= 100) pg = 99;
+          if (String(data.state || "") === "succeeded") pg = 100;
+          if (pg < maxProgressRef.current && String(data.state || "") !== "succeeded")
+            pg = maxProgressRef.current;
+          maxProgressRef.current = pg;
+          setGenerateVideoProgress(pg);
+          setVideoJobInfo({
+            totalSegments: total,
+            completedSegments: completed,
+            totalDurationSec: Number(data.totalDurationSec || 0),
+            completedDurationSec: Number(data.completedDurationSec || 0),
+            currentSegmentIndex: currentSeg
+              ? Number(currentSeg.segmentIndex || 0)
+              : -1,
+            currentSegmentProgress: currentSeg
+              ? Number(currentSeg.progress || 0)
+              : 0,
+            etaSec: Number(data.etaSec || 0),
+            elapsedSec: Number(data.elapsedSec || 0),
+            state: String(data.state || ""),
+          });
+        } else {
+          let pg = Math.max(0, Math.min(100, Number(data.progress || 0)));
+          if (pg > 0) {
+            if (isGpuStage) {
+              hasBackendProgressRef.current = true;
+              if (generateVideoIntervalRef.current) {
+                clearInterval(generateVideoIntervalRef.current);
+                generateVideoIntervalRef.current = null;
+              }
+            }
+            if (pg < maxProgressRef.current) pg = maxProgressRef.current;
+            maxProgressRef.current = pg;
+            setGenerateVideoProgress(pg);
+          }
+        }
       }
     });
     return off;
@@ -164,12 +291,61 @@ export function VideoGenerateCard() {
     else showToast(result.error || "保存失败", "error");
   };
   const handleUploadVideoMaterial = async (event) => {
-    openAd();
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setVideoUploadText("上传");
+    const ext = file.name.toLowerCase().split(".").pop();
+    if (ext !== "mp4" && file.type !== "video/mp4") {
+      showToast("只支持上传MP4格式的视频文案", "info");
+      setVideoUploadText("上传");
+      event.target.value = "";
+      return;
+    }
+    setIsUploadingVideo(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const base64Data = e.target?.result;
+          const base64Content = base64Data.split(",")[1];
+          const tempFileName = `temp_${Date.now()}_${file.name}`;
+          const saveResult = await window.api.saveFileFromBase64(
+            base64Content,
+            tempFileName,
+            "temp/videos",
+          );
+          if (!saveResult.success || !saveResult.file_path) {
+            showToast("保存视频文件失败", "error");
+            setIsUploadingVideo(false);
+            return;
+          }
+          const uploadResult = await window.api.uploadVideoMaterial(
+            saveResult.file_path,
+            file.name,
+          );
+          if (uploadResult.success && uploadResult.file_path) {
+            const cfg = await window.api.loadUploadedVideosConfig();
+            setUploadedVideos(cfg.videos ?? []);
+            setSelectedVideoMaterialId(uploadResult.video_id || "");
+          } else {
+            showToast(`上传失败: ${uploadResult.error || "未知错误"}`, "error");
+          }
+        } catch (err) {
+          console.error("Upload video error:", err);
+          showToast(`上传失败: ${err.message || "未知错误"}`, "error");
+        } finally {
+          setIsUploadingVideo(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error("Read file error:", err);
+      showToast(`上传失败: ${err.message || "未知错误"}`, "error");
+      setIsUploadingVideo(false);
+    }
+    event.target.value = "";
   };
   const handleGenerateVideo = async () => {
-    openAd();
-  };
-  const _handleGenerateVideo_disabled = async () => {
     if (isGeneratingVideo) return;
     if (!generatedAudioPath) {
       showToast("请先生成音频（文案转音频", "info");
@@ -182,10 +358,16 @@ export function VideoGenerateCard() {
     useVideoPageStore.getState().setWhisperSegments([]);
     setIsGeneratingVideo(true);
     setGenerateVideoProgress(0);
+    setVideoProgressTick(0);
+    setVideoPhaseText("准备素材");
     setGeneratedVideoPreview("");
+    setVideoDownloadInfo(null);
     videoStartTimeRef.current = Date.now();
+    hasBackendProgressRef.current = false;
+    maxProgressRef.current = 0;
     const estimatedDuration = 12e4;
     generateVideoIntervalRef.current = setInterval(() => {
+      if (hasBackendProgressRef.current) return;
       if (isVideoQueueingRef.current) return;
       const progress = Math.min(
         Math.round(
@@ -193,7 +375,7 @@ export function VideoGenerateCard() {
         ),
         90,
       );
-      setGenerateVideoProgress(progress);
+      setGenerateVideoProgress((prev) => Math.max(prev, progress));
     }, 200);
     const traceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (userInfo?.phone) {
@@ -263,7 +445,7 @@ export function VideoGenerateCard() {
       console.error("生成视频失败:", error);
       const err = error;
       if (err.message?.includes("fetch failed"))
-        showToast("请联系客服人员，激活账号", "error");
+        showToast("连接试用节点失败，请检查网络后重试", "error");
       else showToast(`生成视频失败: ${err.message || "未知错误"}`, "error");
       if (userInfo?.phone) {
         exceptionService.submitException({
@@ -278,6 +460,7 @@ export function VideoGenerateCard() {
       isVideoQueueingRef.current = false;
       setIsVideoQueuing(false);
       setIsGeneratingVideo(false);
+      setVideoPhaseText("准备素材");
       if (generateVideoIntervalRef.current) {
         clearInterval(generateVideoIntervalRef.current);
         generateVideoIntervalRef.current = null;
@@ -289,6 +472,81 @@ export function VideoGenerateCard() {
     (autoFlowRunning &&
       (autoFlowStep === "video" || autoFlowStep === "insertTitle")) ||
     (flowMode === "manual" && isGeneratingVideo);
+  const videoElapsedSec = isGeneratingVideo && videoStartTimeRef.current
+    ? Math.max(0, Math.floor((Date.now() - videoStartTimeRef.current) / 1000))
+    : 0;
+  const videoBackendElapsedSec = Number(videoJobInfo?.elapsedSec || 0);
+  const videoDisplayElapsed = videoBackendElapsedSec > 0 ? videoBackendElapsedSec : videoElapsedSec;
+  const videoIsDownloading = !!videoDownloadInfo &&
+    (videoDownloadInfo.phase === "progress" ||
+      videoDownloadInfo.phase === "start" ||
+      videoDownloadInfo.phase === "retry");
+  const videoDisplayProgress = (() => {
+    void videoProgressTick;
+    if (!isGeneratingVideo) return generateVideoProgress;
+    if (isVideoQueuing) {
+      const queued = Math.max(generateVideoProgress, 8);
+      const crawl = Math.min(18, Math.floor(8 + videoDisplayElapsed * 0.35));
+      return Math.max(queued, crawl);
+    }
+    if (videoIsDownloading) {
+      const p = Math.max(0, Math.min(100, videoDownloadInfo?.percent || 0));
+      return 90 + p * 0.1;
+    }
+    const raw = Math.max(0, Math.min(100, Number(generateVideoProgress || 0)));
+    if (raw >= 100) return 100;
+    if (
+      videoPhaseText === "上传素材" ||
+      videoPhaseText === "提交任务" ||
+      videoPhaseText === "等待云端"
+    ) {
+      const crawl = Math.min(40, raw + Math.floor(videoDisplayElapsed * 0.25));
+      return Math.max(raw, crawl);
+    }
+    const soft = Math.min(96, Math.floor(4 + (1 - Math.exp(-videoDisplayElapsed / 140)) * 92));
+    return Math.max(raw, soft);
+  })();
+  const videoProgressClassName = [
+    "video-progress",
+    isGeneratingVideo ? "video-progress--active" : "",
+    isVideoQueuing && generateVideoProgress < 12 ? "video-progress--indeterminate" : "",
+    videoIsDownloading ? "video-progress--download" : "",
+  ].filter(Boolean).join(" ");
+  const videoProgressBarClassName = [
+    "video-progress-bar",
+    isGeneratingVideo ? "video-progress-bar--active" : "",
+  ].filter(Boolean).join(" ");
+  const videoGenerateButtonText = (() => {
+    if (!isGeneratingVideo) return "生成形象";
+    if (isVideoQueuing) {
+      const pct = Math.round(videoDisplayProgress);
+      return pct > 8
+        ? `排队上传 ${pct}% · ${formatVideoElapsed(videoDisplayElapsed)}`
+        : `排队中 · ${formatVideoElapsed(videoDisplayElapsed)}`;
+    }
+    const dl = videoDownloadInfo;
+    if (dl && (dl.phase === "start" || dl.phase === "progress" || dl.phase === "retry")) {
+      if (dl.phase === "retry") return `下载重试中 · ${formatVideoElapsed(videoDisplayElapsed)}`;
+      const fmtMB = (b: number) => (b / 1024 / 1024).toFixed(1);
+      const speedStr = dl.speedBps > 0 ? ` · ${fmtMB(dl.speedBps)}MB/s` : "";
+      if (dl.total > 0 && dl.percent > 0) {
+        return `下载中 ${dl.percent}%${speedStr}`;
+      }
+      return `下载中 · ${formatVideoElapsed(videoDisplayElapsed)}${speedStr}`;
+    }
+    if (videoJobInfo && videoJobInfo.totalSegments > 1) {
+      const segIdx = videoJobInfo.currentSegmentIndex >= 0
+        ? videoJobInfo.currentSegmentIndex + 1
+        : videoJobInfo.completedSegments + 1;
+      const etaStr = videoJobInfo.etaSec > 0
+        ? (videoJobInfo.etaSec < 60
+            ? `剩约${videoJobInfo.etaSec}秒`
+            : `剩约${Math.ceil(videoJobInfo.etaSec / 60)}分钟`)
+        : formatVideoElapsed(videoDisplayElapsed);
+      return `${segIdx}/${videoJobInfo.totalSegments}段 ${Math.round(videoDisplayProgress)}% · ${etaStr}`;
+    }
+    return `${videoPhaseText} ${Math.round(videoDisplayProgress)}% · ${formatVideoElapsed(videoDisplayElapsed)}`;
+  })();
   return jsxRuntimeExports.jsxs(React.Fragment, {
     children: [
       jsxRuntimeExports.jsxs("div", {
@@ -337,16 +595,23 @@ export function VideoGenerateCard() {
                       }),
                       jsxRuntimeExports.jsx("div", {
                         className: "video-select-upload-row__upload",
-                        children: jsxRuntimeExports.jsx(
+                        children: jsxRuntimeExports.jsxs(
                           "div",
                           {
-                            className: "video-file-input video-file-input-wrap",
-                            onClick: () => openAd(),
-                            style: { cursor: "pointer" },
-                            children: jsxRuntimeExports.jsx("span", {
-                              className: "video-file-input-text",
-                              children: "上传",
-                            }),
+                            className: `video-file-input video-file-input-wrap ${isUploadingVideo ? "disabled" : ""}`,
+                            children: [
+                              jsxRuntimeExports.jsx("span", {
+                                className: "video-file-input-text",
+                                children: videoUploadText,
+                              }),
+                              jsxRuntimeExports.jsx("input", {
+                                type: "file",
+                                accept: "video/mp4,.mp4",
+                                className: "video-file-input-real",
+                                onChange: handleUploadVideoMaterial,
+                                disabled: isUploadingVideo,
+                              }),
+                            ],
                           },
                         ),
                       }),
@@ -365,23 +630,26 @@ export function VideoGenerateCard() {
                   jsxRuntimeExports.jsxs("button", {
                     onClick: handleGenerateVideo,
                     disabled: isGeneratingVideo,
-                    className: "video-button video-button-primary",
+                    className: `video-button video-button-primary ${isGeneratingVideo ? "video-button-progress-active" : ""}`,
                     children: [
                       jsxRuntimeExports.jsxs("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("polygon", { points: "23 7 16 12 23 17 23 7" }), jsxRuntimeExports.jsx("rect", { x: "1", y: "5", width: "15", height: "14", rx: "2", ry: "2" })] }),
-                      isGeneratingVideo
-                        ? isVideoQueuing
-                          ? "排队中.."
-                          : `生成中${generateVideoProgress}%`
-                        : "生成形象",
+                      videoGenerateButtonText,
                     ],
                   }),
                   isGeneratingVideo &&
                     jsxRuntimeExports.jsx("div", {
-                      className: "video-progress",
+                      className: videoProgressClassName,
                       children: jsxRuntimeExports.jsx("div", {
-                        className: "video-progress-bar",
+                        className: videoProgressBarClassName,
                         style: {
-                          width: `${isVideoQueuing ? 0 : generateVideoProgress}%`,
+                          width: `${videoDisplayProgress}%`,
+                          transition: "width 0.25s ease-out",
+                          backgroundColor: videoDownloadInfo &&
+                            (videoDownloadInfo.phase === "progress" ||
+                             videoDownloadInfo.phase === "start" ||
+                             videoDownloadInfo.phase === "retry")
+                            ? "var(--ly-success, #22c55e)"
+                            : undefined,
                         },
                       }),
                     }),
@@ -632,23 +900,40 @@ export function VideoGenerateCard() {
                       })
                     : videoHistory.historyList.map((item) =>
                         jsxRuntimeExports.jsxs(
-                          "button",
+                          "div",
                           {
-                            type: "button",
-                            className: "video-history-item",
-                            onClick: () => handleLoadHistoryItem(item),
+                            className: "video-history-item-row",
                             children: [
-                              jsxRuntimeExports.jsx("span", {
-                                className: "video-history-item-label",
-                                children: item.label || "未命名",
-                              }),
-                              jsxRuntimeExports.jsx("span", {
-                                className: "video-history-item-date",
-                                children: item.createdAt
-                                  ? new Date(item.createdAt).toLocaleString(
-                                      "zh-CN",
-                                    )
-                                  : "",
+                              jsxRuntimeExports.jsxs(
+                                "button",
+                                {
+                                  type: "button",
+                                  className: "video-history-item",
+                                  onClick: () => handleLoadHistoryItem(item),
+                                  children: [
+                                    jsxRuntimeExports.jsx("span", {
+                                      className: "video-history-item-label",
+                                      children: item.label || "未命名",
+                                    }),
+                                    jsxRuntimeExports.jsx("span", {
+                                      className: "video-history-item-date",
+                                      children: item.createdAt
+                                        ? new Date(item.createdAt).toLocaleString(
+                                            "zh-CN",
+                                          )
+                                        : "",
+                                    }),
+                                  ],
+                                },
+                              ),
+                              jsxRuntimeExports.jsx("button", {
+                                type: "button",
+                                className: "video-history-delete",
+                                title: "删除该记录",
+                                "aria-label": "删除该记录",
+                                onClick: (e) =>
+                                  videoHistory.deleteSnapshot(item.id, e),
+                                children: "删除",
                               }),
                             ],
                           },
@@ -664,141 +949,109 @@ export function VideoGenerateCard() {
 }
 const DEFAULT_BGM_CARD_VOICE_VOLUME = 2;
 const DEFAULT_BGM_CARD_MUSIC_VOLUME = 0.6;
+var _ALIGN_PUNCT_RE = /[\s，。！？；：、…—.!?;:,\uff0c\uff01\uff1f\uff1a\uff1b\u3001\u2026\u2014"''\"\u201c\u201d\u2018\u2019]/g;
+function _stripPunctCount(s) {
+  return Math.max(s.replace(_ALIGN_PUNCT_RE, "").length, 1);
+}
+function _postProcessAligned(out, audioEnd) {
+  if (!out.length) return out;
+  var LINGER = 1.5;
+  for (var i = 0; i < out.length - 1; i++) {
+    var g = out[i + 1].start - out[i].end;
+    if (g > 0 && g <= LINGER) out[i].end = out[i + 1].start;
+    else if (g > LINGER) out[i].end = out[i].end + LINGER;
+  }
+  for (var i = 0; i < out.length - 1; i++) {
+    if (out[i].end > out[i + 1].start) out[i + 1].start = out[i].end;
+  }
+  if (audioEnd > 0 && out[out.length - 1].end < audioEnd) {
+    out[out.length - 1].end = audioEnd;
+  }
+  return out;
+}
 function computeLineSegmentsFromWhisper(
   whisperSegments,
   fullText,
   audioDuration,
 ) {
   const text = fullText.trim();
-  if (!text || !audioDuration || audioDuration <= 0) return [];
+  let effectiveDuration = audioDuration;
+  if ((!effectiveDuration || effectiveDuration <= 0) && whisperSegments?.length > 0) {
+    effectiveDuration = Math.max(...whisperSegments.map((s) => s.end ?? 0));
+  }
+  if (!text || !effectiveDuration || effectiveDuration <= 0) return [];
   const sentences = text
     .split(/\n/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (sentences.length === 0) return [];
-  const durationPerSentence = audioDuration / sentences.length;
-  const wordsWithOffset = [];
-  let charIdx = 0;
-  for (const seg of whisperSegments) {
-    if (seg.words?.length) {
-      for (const w of seg.words) {
-        const len = (w.word ?? "").length;
-        wordsWithOffset.push({
-          word: w.word,
-          start: w.start,
-          end: w.end,
-          charStart: charIdx,
-          charEnd: charIdx + len,
-        });
-        charIdx += len;
-      }
-    } else {
-      const segText = (seg.text ?? "").trim();
-      const len = segText.length;
-      if (len > 0) {
-        wordsWithOffset.push({
-          word: segText,
-          start: seg.start,
-          end: seg.end,
-          charStart: charIdx,
-          charEnd: charIdx + len,
-        });
-        charIdx += len;
-      }
-    }
+
+  // Parse ASR segments
+  const segs = [];
+  for (const seg of (whisperSegments || [])) {
+    const t = (seg.text ?? "").trim();
+    const st = typeof seg.start === "number" ? seg.start : 0;
+    let en = typeof seg.end === "number" ? seg.end : st;
+    if (en < st) en = st;
+    segs.push({ text: t, start: st, end: en, chars: _stripPunctCount(t) });
   }
-  const whisperFullText = wordsWithOffset.map((w) => w.word).join("");
-  const getTimeRangeForCharRange = (charStart, charEnd) => {
-    const overlapping = wordsWithOffset.filter(
-      (w) => w.charEnd > charStart && w.charStart < charEnd,
-    );
-    if (overlapping.length === 0) return null;
-    return {
-      start: Math.min(...overlapping.map((w) => w.start)),
-      end: Math.max(...overlapping.map((w) => w.end)),
-    };
-  };
-  const normToRaw = (normIdx, normText) => {
-    let n = 0;
-    for (const w of wordsWithOffset) {
-      const wNorm = w.word.replace(/\s/g, "").length;
-      if (n + wNorm > normIdx) return w.charStart + (normIdx - n);
-      n += wNorm;
-    }
-    return normText.length;
-  };
-  const sentNormLengths = sentences.map((s) => s.replace(/\s/g, "").length);
-  const totalSentNorm = sentNormLengths.reduce((a, b) => a + b, 0) || 1;
-  const whisperNormText = whisperFullText.replace(/\s/g, "");
-  const whisperNormLen = whisperNormText.length;
-  const startTimes = [];
-  const endTimes = [];
-  for (let i = 0; i < sentences.length; i++) {
-    let startTime;
-    let endTime;
-    if (
-      whisperSegments.length > 0 &&
-      wordsWithOffset.length > 0 &&
-      whisperFullText.length > 0 &&
-      whisperNormLen > 0
-    ) {
-      const prevNorm = sentNormLengths.slice(0, i).reduce((a, b) => a + b, 0);
-      const sentNormLen = sentNormLengths[i];
-      const ratioStart = prevNorm / totalSentNorm;
-      const ratioEnd = (prevNorm + sentNormLen) / totalSentNorm;
-      const normStart = Math.min(
-        Math.floor(ratioStart * whisperNormLen),
-        whisperNormLen - 1,
-      );
-      const normEnd = Math.min(
-        Math.ceil(ratioEnd * whisperNormLen),
-        whisperNormLen,
-      );
-      const charStart = normToRaw(normStart, whisperNormText);
-      const charEnd = normToRaw(normEnd, whisperNormText);
-      const range = getTimeRangeForCharRange(charStart, charEnd);
-      if (range) {
-        startTime = range.start;
-        endTime = range.end;
-      } else {
-        const fallback = getTimeRangeForCharRange(charStart, charStart + 1);
-        startTime = fallback?.start ?? i * durationPerSentence;
-        endTime = fallback
-          ? Math.min(fallback.end + 0.5, audioDuration)
-          : Math.min((i + 1) * durationPerSentence, audioDuration);
+
+  if (segs.length === 0) {
+    const per = effectiveDuration / sentences.length;
+    return sentences.map((s, i) => ({ text: s, start: i * per, end: (i + 1) * per }));
+  }
+
+  const audioEnd = segs[segs.length - 1].end;
+
+  // Fast path: 1:1 mapping (backend already post-processed timestamps)
+  if (segs.length === sentences.length) {
+    return segs.map((sg, i) => ({ text: sentences[i], start: sg.start, end: sg.end }));
+  }
+
+  // General case: per-segment interpolation (monotonic ordering guaranteed)
+  // Build timeline: cumulative char units per segment
+  let totalUnits = 0;
+  const timeline = segs.map((sg) => {
+    const item = { su: totalUnits, eu: totalUnits + sg.chars, st: sg.start, et: sg.end };
+    totalUnits += sg.chars;
+    return item;
+  });
+
+  function unitToTime(unit) {
+    if (unit <= 0) return timeline[0].st;
+    if (unit >= totalUnits) return timeline[timeline.length - 1].et;
+    for (const item of timeline) {
+      if (unit < item.eu) {
+        const span = Math.max(item.eu - item.su, 1);
+        const frac = (unit - item.su) / span;
+        return item.st + frac * (item.et - item.st);
       }
-    } else if (whisperSegments.length > 0) {
-      const base = whisperSegments[whisperSegments.length - 1].end;
-      const extra = i - whisperSegments.length;
-      const totalExtra = Math.max(1, sentences.length - whisperSegments.length);
-      const extraDuration = Math.max(0, audioDuration - base) / totalExtra;
-      startTime =
-        i < whisperSegments.length
-          ? whisperSegments[i].start
-          : base + extra * extraDuration;
-      endTime =
-        i < whisperSegments.length
-          ? whisperSegments[i].end
-          : base + (extra + 1) * extraDuration;
-    } else {
-      startTime = i * durationPerSentence;
-      endTime = Math.min((i + 1) * durationPerSentence, audioDuration);
+      if (unit === item.eu) return item.et;
     }
-    startTimes.push(startTime);
-    endTimes.push(endTime);
+    return timeline[timeline.length - 1].et;
   }
-  for (let i = 0; i < sentences.length - 1; i++) {
-    if (endTimes[i] >= startTimes[i + 1]) {
-      const mid = (endTimes[i] + startTimes[i + 1]) / 2;
-      endTimes[i] = mid - 0.01;
-      startTimes[i + 1] = mid + 0.01;
-    }
+
+  const subUnits = sentences.map((s) => _stripPunctCount(s));
+  const subTotal = subUnits.reduce((a, b) => a + b, 0);
+
+  if (subTotal === 0 || totalUnits === 0) {
+    const per = effectiveDuration / sentences.length;
+    return sentences.map((s, i) => ({ text: s, start: i * per, end: (i + 1) * per }));
   }
-  return sentences.map((text2, i) => ({
-    text: text2,
-    start: startTimes[i],
-    end: endTimes[i],
-  }));
+
+  const out = [];
+  let cursor = 0;
+  for (let idx = 0; idx < sentences.length; idx++) {
+    const startPos = cursor / subTotal * totalUnits;
+    cursor += subUnits[idx];
+    const endPos = cursor / subTotal * totalUnits;
+    let st = unitToTime(startPos);
+    let et = unitToTime(endPos);
+    if (et <= st) et = st + 0.01;
+    out.push({ text: sentences[idx], start: st, end: et });
+  }
+
+  return out;
 }
 function useApplyAllEffects() {
   const showToast = useToast();
@@ -871,7 +1124,7 @@ function useApplyAllEffects() {
           const _mSub = currentTitleStyle.subTitle != null
             ? { ...(_bMatch?.subTitle || {}), ...currentTitleStyle.subTitle }
             : currentTitleStyle.subTitle;
-          const combinedResult = await generateCombinedTitleImage({
+          const combinedResult = await generateCombinedTitleImageForVideo({
             mainTitle: _mMain.font ? _mMain : {
               font: "黑体",
               fontSize: 48,
@@ -888,7 +1141,7 @@ function useApplyAllEffects() {
             subTitleText,
             customPosX: titleEffectConfig.customPosX ?? null,
             customPosY: titleEffectConfig.customPosY ?? null,
-          });
+          }, baseVideoPath);
           store.setProcessingProgress(30);
           const rangeOk =
             titleSegmentRange != null &&
@@ -904,6 +1157,7 @@ function useApplyAllEffects() {
               mainTitle: _mMain,
               subTitle: _mSub,
               combinedImage: true,
+              nativeResolution: combinedResult.nativeResolution,
               ...(rangeOk
                 ? {
                     startTime: titleSegmentRange.start,
@@ -1974,6 +2228,16 @@ function isImageFile(nameOrPath) {
   const lower = nameOrPath.toLowerCase();
   return /\.(jpg|jpeg|png)$/.test(lower);
 }
+async function resolveSmartcutMediaPreviewUrl(filePath) {
+  if (!filePath) return null;
+  if (/^https?:\/\//i.test(filePath)) return filePath;
+  try {
+    const result = await window.api.getSmartcutPreviewUrl(filePath);
+    return result.success && result.url ? result.url : null;
+  } catch {
+    return null;
+  }
+}
 const SMARTCUT_MIX_INITIAL_SEGMENT_SEC = 5;
 function getSmartcutMixInitialSegmentDuration(item) {
   const path = item.path ?? "";
@@ -2237,60 +2501,19 @@ function renderTitleConfigOnCanvas(ctx, config, canvasWidth, canvasHeight) {
   }
   ctx.restore();
 }
-async function generateCombinedTitleImage(styleConfig) {
-  const mainFont = styleConfig.mainTitle.font || '黑体';
-  const mainWeight = styleConfig.mainTitle.fontWeight ?? 400;
-  const mainSize = styleConfig.mainTitle.fontSize ?? 48;
-  await document.fonts.load(`${mainWeight} ${mainSize}px "${mainFont}"`);
-  if (styleConfig.hasSubTitle && styleConfig.subTitle) {
-    const subFont = styleConfig.subTitle.font || '黑体';
-    const subWeight = styleConfig.subTitle.fontWeight ?? 400;
-    const subSize = styleConfig.subTitle.fontSize ?? 36;
-    await document.fonts.load(`${subWeight} ${subSize}px "${subFont}"`);
+async function generateCombinedTitleImageForVideo(styleConfig, videoPath) {
+  let videoWidth = 720;
+  let videoHeight = 1280;
+  try {
+    const dims = await window.api.getVideoDimensions(videoPath);
+    if (dims?.width && dims?.height) {
+      videoWidth = dims.width;
+      videoHeight = dims.height;
+    }
+  } catch (err) {
+    console.warn("[title] getVideoDimensions failed, using 720x1280:", err);
   }
-  const canvas = document.createElement('canvas');
-  canvas.width = 720;
-  canvas.height = 1280;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('无法创建Canvas上下文');
-  const mainConfig = styleConfig.mainTitle;
-  const mainText = styleConfig.mainTitleText || '';
-  if (!mainText) return { dataUrl: canvas.toDataURL('image/png') };
-  const alignV = mainConfig.alignV || 'top';
-  const top = mainConfig.top ?? 100;
-  function calcMainHeight() {
-    const fs = mainConfig.fontSize || 48;
-    const fw = mainConfig.fontWeight ?? 400;
-    const fn = mainConfig.font || '黑体';
-    ctx.font = `${fw} ${fs}px "${fn}"`;
-    const bl = mainConfig.breakLength;
-    const ls = bl != null && mainText.length >= bl
-      ? splitTextByBreakLength(mainText, bl) : [mainText];
-    const lh = fs * 1.2;
-    const pv = mainConfig.bgPaddingV ?? fs * 0.5;
-    return ls.length * lh + pv * 2;
-  }
-  let mainY;
-  if (styleConfig.customPosY != null) {
-    mainY = styleConfig.customPosY;
-  } else if (alignV === 'top') {
-    mainY = top;
-  } else if (alignV === 'bottom') {
-    mainY = 1280 - top - calcMainHeight();
-  } else {
-    mainY = (1280 - calcMainHeight()) / 2;
-  }
-  ctx.save();
-  const forceCenterX = styleConfig.customPosX != null ? styleConfig.customPosX : undefined;
-  const result = drawTitleBlockOnCanvas(ctx, mainText, mainConfig, 720, mainY, forceCenterX);
-  if (styleConfig.hasSubTitle && styleConfig.subTitle && styleConfig.subTitleText) {
-    const subConfig = styleConfig.subTitle;
-    const subGap = subConfig.top ?? 0;
-    const subY = mainY + result.totalHeight + subGap;
-    drawTitleBlockOnCanvas(ctx, styleConfig.subTitleText, subConfig, 720, subY, forceCenterX);
-  }
-  ctx.restore();
-  return { dataUrl: canvas.toDataURL('image/png') };
+  return buildCombinedTitleImage(styleConfig, videoWidth, videoHeight);
 }
 async function generateTitleImage(text, config, _videoWidth = 720) {
   const canvas = document.createElement('canvas');
@@ -2379,6 +2602,7 @@ function ThemeTemplatePreviewCard({
   imageUrl,
   mainTitleText,
   subTitleText,
+  generatedFirstFrameUrl,
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -2609,13 +2833,10 @@ function ThemeTemplatePreviewCard({
             })
           : jsxRuntimeExports.jsxs(React.Fragment, {
               children: [
-                videoUrl
-                  ? jsxRuntimeExports.jsx("video", {
-                      ref: videoRef,
-                      src: videoUrl,
-                      muted: true,
-                      playsInline: true,
-                      preload: "metadata",
+                generatedFirstFrameUrl
+                  ? jsxRuntimeExports.jsx("img", {
+                      src: generatedFirstFrameUrl,
+                      alt: style.name,
                       style: {
                         position: "absolute",
                         top: 0,
@@ -2624,11 +2845,18 @@ function ThemeTemplatePreviewCard({
                         height: "100%",
                         objectFit: "cover",
                       },
+                      onError: (e) => {
+                        if (e.currentTarget)
+                          e.currentTarget.style.display = "none";
+                      },
                     })
-                  : imageUrl
-                    ? jsxRuntimeExports.jsx("img", {
-                        src: imageUrl,
-                        alt: style.name,
+                  : videoUrl
+                    ? jsxRuntimeExports.jsx("video", {
+                        ref: videoRef,
+                        src: videoUrl,
+                        muted: true,
+                        playsInline: true,
+                        preload: "metadata",
                         style: {
                           position: "absolute",
                           top: 0,
@@ -2637,27 +2865,40 @@ function ThemeTemplatePreviewCard({
                           height: "100%",
                           objectFit: "cover",
                         },
-                        onError: (e) => {
-                          if (e.currentTarget)
-                            e.currentTarget.style.display = "none";
-                        },
                       })
-                    : jsxRuntimeExports.jsx("div", {
-                        style: {
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "100%",
-                          height: "100%",
-                          backgroundColor: "#1a1a1a",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: "#999",
-                          fontSize: "12px",
-                        },
-                        children: "无预览",
-                      }),
+                    : imageUrl
+                      ? jsxRuntimeExports.jsx("img", {
+                          src: imageUrl,
+                          alt: style.name,
+                          style: {
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                          },
+                          onError: (e) => {
+                            if (e.currentTarget)
+                              e.currentTarget.style.display = "none";
+                          },
+                        })
+                      : jsxRuntimeExports.jsx("div", {
+                          style: {
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: "100%",
+                            backgroundColor: "#1a1a1a",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "#999",
+                            fontSize: "12px",
+                          },
+                          children: "无预览",
+                        }),
                 subtitleEffect &&
                   jsxRuntimeExports.jsx("canvas", {
                     ref: canvasRef,
@@ -2817,6 +3058,7 @@ function TitleStyleModal({
   subTitle,
   onConfirm,
   onCancel,
+  generatedFirstFrameUrl,
 }) {
   const [customDuration, setCustomDuration] = useState(
     () => titleSegmentRange?.end ?? 5,
@@ -3017,6 +3259,7 @@ function TitleStyleModal({
                     imageUrl: titleStyleImageUrls[style.id],
                     mainTitleText,
                     subTitleText,
+                    generatedFirstFrameUrl,
                   },
                   style.id || "__blank_title__",
                 ),
@@ -5377,7 +5620,69 @@ function SmartCutResourcePanel({
     });
   };
   const handleUploadBgmMaterial = async (event) => {
-    openAd();
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const uploadCategory = pendingBgmUploadCategoryRef.current.trim() || "推荐";
+    pendingBgmUploadCategoryRef.current = "";
+    const fileExtension = file.name.toLowerCase().split(".").pop();
+    const allowedExtensions = ["wav", "mp3", "m4a"];
+    if (!allowedExtensions.includes(fileExtension || "")) {
+      showToast("只支持上传WAV、MP3、M4A 格式的音频文件", "info");
+      event.target.value = "";
+      return;
+    }
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const base64Data = e.target?.result;
+          const base64Content = base64Data.split(",")[1];
+          const tempFileName = `temp_${Date.now()}_${file.name}`;
+          const saveResult = await window.api.saveFileFromBase64(
+            base64Content,
+            tempFileName,
+            "temp/bgms",
+          );
+          if (!saveResult.success || !saveResult.file_path) {
+            showToast("保存音频文件失败", "error");
+            return;
+          }
+          const uploadResult = await window.api.uploadBgmMaterial(
+            saveResult.file_path,
+            file.name,
+            uploadCategory,
+          );
+          if (uploadResult.success && uploadResult.file_path) {
+            const cfg = await window.api.loadUploadedBgmsConfig();
+            const newUploadedBgms = (cfg.bgms ?? []).map((b) =>
+              b.id === uploadResult.bgm_id
+                ? { ...b, category: uploadCategory }
+                : b,
+            );
+            await window.api.saveUploadedBgmsConfig({ bgms: newUploadedBgms });
+            onLocalBgmUpload(
+              newUploadedBgms.map((b) => ({ ...b, category: b.category })),
+            );
+          } else {
+            showToast(`上传失败: ${uploadResult.error || "未知错误"}`, "error");
+          }
+        } catch (error) {
+          console.error("Upload bgm error:", error);
+          showToast(
+            `上传失败: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Read file error:", error);
+      showToast(
+        `上传失败: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    }
+    event.target.value = "";
   };
   const currentBgmList = useMemo(
     () =>
@@ -10860,6 +11165,12 @@ function SmartCutMixUploadWizard({ onCancel, onFinished }) {
         if (res.success && res.file_path) {
           path = res.file_path;
           uploadStatus = "success";
+          if (!isImageFile(file.name)) {
+            const normalizeRes = await window.api.ensureSmartcutPreviewVideo(path);
+            if (normalizeRes.success && normalizeRes.file_path) {
+              path = normalizeRes.file_path;
+            }
+          }
         }
       } catch {
         uploadStatus = "pending";
@@ -11754,7 +12065,7 @@ async function applyTitleToVideo(inputPath, titleConfig, titleTimeRange) {
   const _mergedSub = currentTitleStyle.subTitle != null
     ? { ...(_matchBuiltin?.subTitle || {}), ...currentTitleStyle.subTitle }
     : currentTitleStyle.subTitle;
-  const combinedResult = await generateCombinedTitleImage({
+  const combinedResult = await generateCombinedTitleImageForVideo({
     mainTitle: _mergedMain.font ? _mergedMain : {
       font: "黑体",
       fontSize: 48,
@@ -11771,7 +12082,7 @@ async function applyTitleToVideo(inputPath, titleConfig, titleTimeRange) {
     subTitleText,
     customPosX: titleConfig.customPosX ?? null,
     customPosY: titleConfig.customPosY ?? null,
-  });
+  }, inputPath);
   const titleResult = await window.api.addTitleToVideo(
     inputPath,
     combinedResult.dataUrl,
@@ -11781,6 +12092,7 @@ async function applyTitleToVideo(inputPath, titleConfig, titleTimeRange) {
       mainTitle: _mergedMain,
       subTitle: _mergedSub,
       combinedImage: true,
+      nativeResolution: combinedResult.nativeResolution,
       startTime: titleTimeRange?.start,
       endTime: titleTimeRange?.end,
     },
@@ -12193,6 +12505,7 @@ function CompositePreview(props) {
     h: 0,
   });
   const [resourceUrls, setResourceUrls] = useState({});
+  const [mixLoadErrors, setMixLoadErrors] = useState({});
   const [bgmUrl, setBgmUrl] = useState(null);
   const [mainVidDrag, setMainVidDrag] = useState(null);
   const [pipDrag, setPipDrag] = useState(null);
@@ -12232,8 +12545,8 @@ function CompositePreview(props) {
     Promise.all(
       allRes.map(async ({ id, path }) => {
         try {
-          const result = await window.api.getLocalFileUrl(path);
-          return { id, url: result.success && result.url ? result.url : null };
+          const url = await resolveSmartcutMediaPreviewUrl(path);
+          return { id, url };
         } catch {
           return { id, url: null };
         }
@@ -12245,6 +12558,7 @@ function CompositePreview(props) {
         if (r.url) map[r.id] = r.url;
       });
       setResourceUrls(map);
+      setMixLoadErrors({});
     });
     return () => {
       cancelled = true;
@@ -12252,22 +12566,33 @@ function CompositePreview(props) {
   }, [mixResources, pipResources]);
   useEffect(() => {
     if (!bgmSelectedBgmId) {
+      console.log('[CompositePreview BGM] No bgmSelectedBgmId, clearing URL');
       setBgmUrl(null);
       return;
     }
     const bgm = allBgms.find((b) => b.id === bgmSelectedBgmId);
+    console.log('[CompositePreview BGM] Looking for BGM:', bgmSelectedBgmId, 'found:', !!bgm, 'path:', bgm?.path, 'allBgms count:', allBgms.length);
     if (!bgm?.path) {
       setBgmUrl(null);
       return;
     }
+    // If path is already a URL (builtin BGMs use http://... URLs), use directly
+    if (bgm.path.startsWith('http://') || bgm.path.startsWith('https://')) {
+      console.log('[CompositePreview BGM] Using path directly as URL:', bgm.path.substring(0, 80));
+      setBgmUrl(bgm.path);
+      return;
+    }
+    // Otherwise resolve filesystem path to URL via IPC
     let cancelled = false;
     window.api
       .getLocalFileUrl(bgm.path)
       .then((res) => {
+        console.log('[CompositePreview BGM] getLocalFileUrl result:', res?.success, 'url:', res?.url?.substring(0, 80));
         if (!cancelled && res.success && res.url) setBgmUrl(res.url);
         else if (!cancelled) setBgmUrl(null);
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('[CompositePreview BGM] getLocalFileUrl error:', err);
         if (!cancelled) setBgmUrl(null);
       });
     return () => {
@@ -12320,16 +12645,26 @@ function CompositePreview(props) {
     return () => ro.disconnect();
   }, [containerRef, updateContainerSize, videoSrc]);
   useEffect(() => {
-    if (bgmAudioRef.current) bgmAudioRef.current.volume = bgmVolume;
-  }, [bgmVolume]);
+    if (bgmAudioRef.current) {
+      bgmAudioRef.current.volume = bgmVolume;
+      console.log('[CompositePreview BGM] Set audio volume:', bgmVolume);
+    }
+  }, [bgmVolume, bgmUrl]);
   useEffect(() => {
     if (videoRef.current)
       videoRef.current.volume = Math.min(1, bgmSelectedBgmId ? voiceVolume : 1);
   }, [voiceVolume, bgmSelectedBgmId, videoRef]);
+  const syncBgmLogRef = useRef(0);
   const syncBgm = useCallback(
     (videoTime, play, forceSeek = false) => {
       const audio = bgmAudioRef.current;
-      if (!audio || !bgmUrl) return;
+      if (!audio || !bgmUrl) {
+        if (syncBgmLogRef.current < 3) {
+          console.log('[syncBgm] skip: audio=', !!audio, 'bgmUrl=', !!bgmUrl);
+          syncBgmLogRef.current++;
+        }
+        return;
+      }
       const r = bgmRange;
       if (!r) {
         if (!audio.paused) audio.pause();
@@ -12340,7 +12675,11 @@ function CompositePreview(props) {
         if (forceSeek || needStart) {
           audio.currentTime = videoTime - r.start;
         }
-        if (needStart) audio.play().catch(() => {});
+        if (needStart) {
+          console.log('[syncBgm] Starting BGM audio, time:', videoTime, 'range:', r, 'volume:', audio.volume);
+          syncBgmLogRef.current = 0;
+          audio.play().catch((err) => console.error('[syncBgm] audio.play() failed:', err));
+        }
       } else {
         if (!audio.paused) audio.pause();
       }
@@ -12352,6 +12691,15 @@ function CompositePreview(props) {
       mixSegments.find((s) => currentTime >= s.start && currentTime < s.end) ??
       null,
     [mixSegments, currentTime],
+  );
+  const activeMixResourceId = activeMixSeg?.mixResourceId ?? null;
+  const activeMixUrl = activeMixResourceId
+    ? resourceUrls[activeMixResourceId]
+    : null;
+  const showMixLayer = !!(
+    activeMixSeg &&
+    activeMixUrl &&
+    !mixLoadErrors[activeMixResourceId]
   );
   const activePipSegs = useMemo(
     () =>
@@ -12379,7 +12727,7 @@ function CompositePreview(props) {
         if (!isPlaying && !v.paused) v.pause();
       }
     }
-  }, [activeMixSeg, currentTime, isPlaying]);
+  }, [activeMixSeg, activeMixUrl, currentTime, isPlaying, resourceUrls]);
   useEffect(() => {
     const currentIds = new Set(activePipSegs.map((s) => s.pipResourceId));
     for (const oldId of prevActivePipIdsRef.current) {
@@ -12595,7 +12943,6 @@ function CompositePreview(props) {
       y: Math.max(0, Math.min(100, ((clientY - rect.top) / rect.height) * 100)),
     };
   }, []);
-  const mainVideoPercentRatio = 1;
   useEffect(() => {
     if (!mainVidDrag) return;
     const onMove = (e) => {
@@ -12621,12 +12968,22 @@ function CompositePreview(props) {
         );
         onMainVideoRectChange(snapped);
       } else {
-        const rawH = Math.max(MIN_PIP_SIZE$1, y - mainVidDrag.startRect.y);
-        const rawW = rawH * mainVideoPercentRatio;
+        const deltaX = x - mainVidDrag.startX;
+        const deltaY = y - mainVidDrag.startY;
+        const rawW = mainVidDrag.startRect.width + deltaX;
+        const rawH = mainVidDrag.startRect.height + deltaY;
+        const newW = Math.max(
+          MIN_PIP_SIZE$1,
+          Math.min(MAX_PIP_PERCENT$1 - mainVidDrag.startRect.x, rawW),
+        );
+        const newH = Math.max(
+          MIN_PIP_SIZE$1,
+          Math.min(MAX_PIP_PERCENT$1 - mainVidDrag.startRect.y, rawH),
+        );
         onMainVideoRectChange({
           ...mainVidDrag.startRect,
-          width: Math.max(MIN_PIP_SIZE$1, rawW),
-          height: rawH,
+          width: newW,
+          height: newH,
         });
       }
     };
@@ -12641,25 +12998,9 @@ function CompositePreview(props) {
     mainVidDrag,
     overlayToPercent,
     onMainVideoRectChange,
-    mainVideoPercentRatio,
     snapEnabled,
     snapThreshold,
   ]);
-  const [pipMaterialSizes, setPipMaterialSizes] = useState({});
-  const pipSizeRatio = useMemo(() => {
-    const dragSeg = pipDrag
-      ? pipSegments.find((s) => s.id === pipDrag.segId)
-      : null;
-    const pipResId = dragSeg?.pipResourceId;
-    if (!pipResId) return 1;
-    const matSize = pipMaterialSizes[pipResId];
-    const materialAspect = matSize ? matSize.w / matSize.h : 16 / 9;
-    const stageAspect =
-      mainVideoSize && mainVideoSize.width > 0
-        ? mainVideoSize.height / mainVideoSize.width
-        : 16 / 9;
-    return materialAspect * stageAspect;
-  }, [pipDrag, pipSegments, pipMaterialSizes, mainVideoSize]);
   useEffect(() => {
     if (!pipDrag) return;
     const onMove = (e) => {
@@ -12685,23 +13026,22 @@ function CompositePreview(props) {
         );
         onPipSegmentRectChange(pipDrag.segId, snapped);
       } else {
-        const rawH = Math.max(
-          MIN_PIP_SIZE$1,
-          Math.min(
-            MAX_PIP_PERCENT$1 - pipDrag.startRect.y,
-            y - pipDrag.startRect.y,
-          ),
-        );
-        const rawW = rawH * pipSizeRatio;
+        const deltaX = x - pipDrag.startX;
+        const deltaY = y - pipDrag.startY;
+        const rawW = pipDrag.startRect.width + deltaX;
+        const rawH = pipDrag.startRect.height + deltaY;
         const newW = Math.max(
           MIN_PIP_SIZE$1,
-          Math.min(MAX_PIP_PERCENT$1 - pipDrag.startRect.x, rawW),
+          Math.min(
+            MAX_PIP_PERCENT$1 - pipDrag.startRect.x,
+            rawW,
+          ),
         );
         const newH = Math.max(
           MIN_PIP_SIZE$1,
           Math.min(
             MAX_PIP_PERCENT$1 - pipDrag.startRect.y,
-            newW / pipSizeRatio,
+            rawH,
           ),
         );
         onPipSegmentRectChange(pipDrag.segId, {
@@ -12722,7 +13062,6 @@ function CompositePreview(props) {
     pipDrag,
     overlayToPercent,
     onPipSegmentRectChange,
-    pipSizeRatio,
     snapEnabled,
     snapThreshold,
   ]);
@@ -12868,44 +13207,56 @@ function CompositePreview(props) {
             jsxRuntimeExports.jsxs("div", {
               className: "smartcut-mix-layer",
               style: {
-                opacity: activeMixSeg ? 1 : 0,
-                pointerEvents: activeMixSeg ? "auto" : "none",
+                opacity: showMixLayer ? 1 : 0,
+                pointerEvents: showMixLayer ? "auto" : "none",
               },
               children: [
-                mixVideoIds.map((resId) =>
-                  jsxRuntimeExports.jsx(
+                mixVideoIds.map((resId) => {
+                  const mixUrl = resourceUrls[resId];
+                  if (!mixUrl) return null;
+                  return jsxRuntimeExports.jsx(
                     "video",
                     {
                       ref: (el) => {
                         mixVideoRefs.current[resId] = el;
                       },
-                      src: resourceUrls[resId],
+                      src: mixUrl,
                       preload: "auto",
                       muted: true,
                       playsInline: true,
+                      onError: () => {
+                        setMixLoadErrors((prev) => ({ ...prev, [resId]: true }));
+                      },
                       style: {
-                        opacity: activeMixSeg?.mixResourceId === resId ? 1 : 0,
+                        opacity:
+                          activeMixSeg?.mixResourceId === resId ? 1 : 0,
                         pointerEvents: "none",
                       },
                     },
                     resId,
-                  ),
-                ),
-                mixImageIds.map((resId) =>
-                  jsxRuntimeExports.jsx(
+                  );
+                }),
+                mixImageIds.map((resId) => {
+                  const mixUrl = resourceUrls[resId];
+                  if (!mixUrl) return null;
+                  return jsxRuntimeExports.jsx(
                     "img",
                     {
-                      src: resourceUrls[resId],
+                      src: mixUrl,
                       alt: "",
                       draggable: false,
+                      onError: () => {
+                        setMixLoadErrors((prev) => ({ ...prev, [resId]: true }));
+                      },
                       style: {
-                        opacity: activeMixSeg?.mixResourceId === resId ? 1 : 0,
+                        opacity:
+                          activeMixSeg?.mixResourceId === resId ? 1 : 0,
                         pointerEvents: "none",
                       },
                     },
                     resId,
-                  ),
-                ),
+                  );
+                }),
               ],
             }),
           activePipSegs.map((seg) => {
@@ -12949,18 +13300,6 @@ function CompositePreview(props) {
                         src: url,
                         alt: "",
                         draggable: false,
-                        onLoad: (e) => {
-                          const img = e.currentTarget;
-                          if (img.naturalWidth && img.naturalHeight) {
-                            setPipMaterialSizes((prev) => ({
-                              ...prev,
-                              [resId]: {
-                                w: img.naturalWidth,
-                                h: img.naturalHeight,
-                              },
-                            }));
-                          }
-                        },
                       })
                     : jsxRuntimeExports.jsx("video", {
                         ref: (el) => {
@@ -12970,15 +13309,6 @@ function CompositePreview(props) {
                         preload: "auto",
                         muted: true,
                         playsInline: true,
-                        onLoadedMetadata: (e) => {
-                          const v = e.currentTarget;
-                          if (v.videoWidth && v.videoHeight) {
-                            setPipMaterialSizes((prev) => ({
-                              ...prev,
-                              [resId]: { w: v.videoWidth, h: v.videoHeight },
-                            }));
-                          }
-                        },
                       }),
                   jsxRuntimeExports.jsx("span", {
                     className: "smartcut-pip-resize-handle",
@@ -13231,6 +13561,8 @@ function CompositePreview(props) {
           src: bgmUrl,
           preload: "auto",
           loop: false,
+          onError: (e) => console.error('[CompositePreview BGM] Audio load error:', e.target?.error?.message, 'src:', bgmUrl?.substring(0, 80)),
+          onCanPlay: () => console.log('[CompositePreview BGM] Audio canplay, duration:', bgmAudioRef.current?.duration),
         }),
     ],
   });
@@ -13240,7 +13572,6 @@ const DEFAULT_PIP_RECT = { x: 70, y: 10, width: 25, height: 25 };
 const MIN_PIP_SIZE = 8;
 const MAX_PIP_PERCENT = 100;
 function SmartCutModal({ show, onClose }) {
-  const { openAd } = useAd();
   const showToast = useToast();
   const [audioDuration, setAudioDuration] = useState(0);
   const [generatedVideoPreview, setGeneratedVideoPreview] =
@@ -13265,6 +13596,8 @@ function SmartCutModal({ show, onClose }) {
   const [selectedMixResourceId, setSelectedMixResourceId] =
     useState(null);
   const [materialPreviewUrl, setMaterialPreviewUrl] =
+    useState(null);
+  const [materialPreviewError, setMaterialPreviewError] =
     useState(null);
   const [materialPreviewIsImage, setMaterialPreviewIsImage] =
     useState(false);
@@ -13503,10 +13836,16 @@ function SmartCutModal({ show, onClose }) {
               }
             : null,
         );
-        const baseDuration =
+        let baseDuration =
           snapshot.audioDuration && snapshot.audioDuration > 0
             ? snapshot.audioDuration
-            : 60;
+            : 0;
+        if (!baseDuration && (snapshot.whisperSegments?.length > 0)) {
+          baseDuration = Math.max(...snapshot.whisperSegments.map((s) => s.end ?? 0));
+        }
+        if (!baseDuration) {
+          baseDuration = (videoDuration && videoDuration > 0) ? videoDuration : 30;
+        }
         const savedLineSegments =
           snapshot.subtitleEffectConfig?.lineSegments ?? [];
         const rawSubtitleText = (
@@ -13524,6 +13863,7 @@ function SmartCutModal({ show, onClose }) {
             end: s.end,
             text: s.text,
           }));
+          _postProcessAligned(segmentsFromStore, baseDuration);
         } else if (rawSubtitleText) {
           const lineSegs = computeLineSegmentsFromWhisper(
             snapshot.whisperSegments ?? [],
@@ -13685,6 +14025,7 @@ function SmartCutModal({ show, onClose }) {
       : selectedMixResourceId;
     if (!selectedId) {
       setMaterialPreviewUrl(null);
+      setMaterialPreviewError(null);
       setMaterialPreviewIsImage(false);
       return;
     }
@@ -13693,26 +14034,31 @@ function SmartCutModal({ show, onClose }) {
       : mixResources.find((r) => r.id === selectedId)?.path;
     if (!selectedPath) {
       setMaterialPreviewUrl(null);
+      setMaterialPreviewError(null);
       setMaterialPreviewIsImage(false);
       return;
     }
     const resIsImage = isImageFile(selectedPath);
     let cancelled = false;
-    window.api
-      .getLocalFileUrl(selectedPath)
-      .then((result) => {
-        if (!cancelled && result.success && result.url) {
-          setMaterialPreviewUrl(result.url);
+    setMaterialPreviewError(null);
+    resolveSmartcutMediaPreviewUrl(selectedPath)
+      .then((url) => {
+        if (cancelled) return;
+        if (url) {
+          setMaterialPreviewUrl(url);
           setMaterialPreviewIsImage(resIsImage);
-        } else if (!cancelled) {
+          setMaterialPreviewError(null);
+        } else {
           setMaterialPreviewUrl(null);
           setMaterialPreviewIsImage(false);
+          setMaterialPreviewError("素材预览加载失败，请重新上传或检查文件是否存在");
         }
       })
       .catch(() => {
         if (!cancelled) {
           setMaterialPreviewUrl(null);
           setMaterialPreviewIsImage(false);
+          setMaterialPreviewError("素材预览加载失败，请重新上传或检查文件是否存在");
         }
       });
     return () => {
@@ -14051,8 +14397,14 @@ function SmartCutModal({ show, onClose }) {
       if (config === null) {
         setLocalWhisperSegments([]);
       } else if (wasNull) {
-        const baseDuration =
-          audioDuration && audioDuration > 0 ? audioDuration : 60;
+        // Derive baseDuration: prefer audioDuration, then whisper segment max end, then fallback
+        let baseDuration = audioDuration && audioDuration > 0 ? audioDuration : 0;
+        if (!baseDuration && whisperSegmentsFromStoreRef.current.length > 0) {
+          baseDuration = Math.max(...whisperSegmentsFromStoreRef.current.map((s) => s.end ?? 0));
+        }
+        if (!baseDuration) {
+          baseDuration = 30;
+        }
         const baseText =
           (subtitleTextFromStoreRef.current &&
             subtitleTextFromStoreRef.current.trim()) ||
@@ -14213,7 +14565,7 @@ function SmartCutModal({ show, onClose }) {
       try {
         const segs = await fetchAndApplyWhisper();
         if (segs.length) {
-          const baseDuration = audioDuration > 0 ? audioDuration : 60;
+          const baseDuration = audioDuration > 0 ? audioDuration : (videoDuration > 0 ? videoDuration : Math.max(...segs.map((s) => s.end ?? 0)) || 30);
           const text = subtitleTextFromStoreRef.current.trim();
           const lineSegs = computeLineSegmentsFromWhisper(
             segs,
@@ -14330,7 +14682,7 @@ function SmartCutModal({ show, onClose }) {
             if (segs.length) {
               whisperSegmentsFromStoreRef.current = segs;
               useVideoPageStore.getState().setWhisperSegments(segs);
-              const baseDuration = Math.max(audioDuration, videoDuration) || 60;
+              const baseDuration = audioDuration > 0 ? audioDuration : (videoDuration > 0 ? videoDuration : Math.max(...segs.map((s) => s.end ?? 0)) || 30);
               const lineSegs = computeLineSegmentsFromWhisper(
                 segs,
                 subtitleText,
@@ -14573,6 +14925,19 @@ function SmartCutModal({ show, onClose }) {
   React.useEffect(() => {
     setSegments(initialSegments);
   }, [initialSegments]);
+  // When videoDuration becomes known (from loadedmetadata), extend subtitle
+  // segments if they end before the actual video duration.
+  useEffect(() => {
+    if (!videoDuration || videoDuration <= 0) return;
+    setLocalWhisperSegments((prev) => {
+      if (!prev || prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.end >= videoDuration - 0.05) return prev; // already covers duration
+      const updated = [...prev];
+      updated[updated.length - 1] = { ...last, end: videoDuration };
+      return updated;
+    });
+  }, [videoDuration]);
   useEffect(() => {
     if (!isVideoPlaying) {
       if (rafIdRef.current != null) {
@@ -15252,6 +15617,10 @@ function SmartCutModal({ show, onClose }) {
                                           src: materialPreviewUrl,
                                           controls: true,
                                           playsInline: true,
+                                          onError: () =>
+                                            setMaterialPreviewError(
+                                              "该视频格式暂不支持预览，应用效果时系统会自动转码",
+                                            ),
                                         },
                                       )
                                   : jsxRuntimeExports.jsx(
@@ -15260,13 +15629,14 @@ function SmartCutModal({ show, onClose }) {
                                         className:
                                           "smartcut-preview-placeholder",
                                         children:
-                                          activeResourceType === "pip"
+                                          materialPreviewError ||
+                                          (activeResourceType === "pip"
                                             ? selectedPipResourceId
                                               ? "正在加载素材"
                                               : "请在左侧画中画素材中点击一项进行预览"
                                             : selectedMixResourceId
                                               ? "正在加载素材"
-                                              : "请在左侧混剪素材中点击一项进行预览",
+                                              : "请在左侧混剪素材中点击一项进行预览"),
                                       },
                                     ),
                               }),

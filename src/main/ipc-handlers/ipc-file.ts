@@ -2,6 +2,75 @@ import { ipcMain, app } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { getUserDataPath, getLocalFileUrl, getLocalServerBaseUrl } from '../local-server'
+import { getCloudResourcesDir } from '../resource-manager'
+import {
+  ensureSmartcutPreviewVideo,
+  resolveSmartcutMediaPath,
+} from '../smartcut-preview-video'
+
+function resolveAssetFilePath(relativePath: string): string {
+  const relativeAssetPath = relativePath.substring('/assets/'.length)
+  const cloudPath = path.join(getCloudResourcesDir(), relativeAssetPath)
+  if (fs.existsSync(cloudPath)) return cloudPath
+
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', relativeAssetPath)
+  }
+
+  const candidates = [
+    path.join(process.cwd(), 'assets', relativeAssetPath),
+    path.join(process.cwd(), 'app', 'assets', relativeAssetPath),
+    path.join(process.cwd(), 'src', 'assets', relativeAssetPath),
+    path.join(__dirname, '..', '..', '..', 'assets', relativeAssetPath)
+  ]
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
+}
+
+function safeFileName(fileName: string): string {
+  const parsed = path.parse(fileName || 'file')
+  const name = parsed.name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || 'file'
+  const ext = parsed.ext.replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+  return `${name}${ext}`
+}
+
+function cleanupMisroutedReferenceVideo(originalName: string): string[] {
+  const configPath = path.join(getUserDataPath(), 'uploaded_videos_config.json')
+  if (!fs.existsSync(configPath)) return []
+
+  const targetName = path.basename(originalName || '', path.extname(originalName || '')).trim()
+  if (!targetName) return []
+
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8') || '{"videos":[]}')
+    const videos = Array.isArray(config.videos) ? config.videos : []
+    const removed: any[] = []
+    const kept = videos.filter((item: any) => {
+      const itemName = String(item?.name || '').trim()
+      const shouldRemove = itemName === targetName
+      if (shouldRemove) removed.push(item)
+      return !shouldRemove
+    })
+
+    if (removed.length === 0) return []
+
+    fs.writeFileSync(configPath, JSON.stringify({ ...config, videos: kept }, null, 2), 'utf-8')
+    const uploadedDir = path.resolve(getUserDataPath('uploaded_videos'))
+    for (const item of removed) {
+      const filePath = typeof item?.path === 'string' ? path.resolve(item.path) : ''
+      if (filePath.startsWith(uploadedDir + path.sep) && fs.existsSync(filePath)) {
+        fs.rmSync(filePath, { force: true })
+      }
+    }
+    return removed.map((item) => item.id).filter(Boolean)
+  } catch (error) {
+    console.warn('[ReferenceVideo] cleanup misrouted uploaded video failed:', error)
+    return []
+  }
+}
+
+function tryResolveExistingFilePath(filePath: string): string {
+  return resolveSmartcutMediaPath(filePath)
+}
 
 export function registerFileHandlers(): void {
   ipcMain.handle('get-local-server-base-url', async () => {
@@ -9,6 +78,9 @@ export function registerFileHandlers(): void {
   })
 
   ipcMain.handle('get-assets-path', async (_, relativePath: string) => {
+    const cloudPath = path.join(getCloudResourcesDir(), relativePath)
+    if (fs.existsSync(cloudPath)) return cloudPath
+
     if (app.isPackaged) {
       return path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', relativePath)
     }
@@ -64,16 +136,15 @@ export function registerFileHandlers(): void {
 
   ipcMain.handle('get-local-file-url', async (_, filePath: string) => {
     try {
+      if (/^https?:\/\//i.test(filePath)) {
+        return { success: true, url: filePath }
+      }
       // Resolve /assets/ prefixed paths to actual filesystem paths
       let resolvedPath = filePath
       if (filePath.startsWith('/assets/')) {
-        const relativePath = filePath.substring('/assets/'.length)
-        if (app.isPackaged) {
-          resolvedPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', relativePath)
-        } else {
-          resolvedPath = path.join(process.cwd(), 'assets', relativePath)
-        }
+        resolvedPath = resolveAssetFilePath(filePath)
       }
+      resolvedPath = tryResolveExistingFilePath(resolvedPath)
       if (!fs.existsSync(resolvedPath)) {
         throw new Error(`File not found: ${resolvedPath}`)
       }
@@ -84,6 +155,45 @@ export function registerFileHandlers(): void {
       throw new Error(`File must be in app-data2 or assets directory`)
     } catch (error: any) {
       return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('get-smartcut-preview-url', async (_, filePath: string) => {
+    try {
+      if (/^https?:\/\//i.test(filePath)) {
+        return { success: true, url: filePath }
+      }
+      let resolvedPath = filePath
+      if (filePath.startsWith('/assets/')) {
+        resolvedPath = resolveAssetFilePath(filePath)
+      }
+      resolvedPath = await ensureSmartcutPreviewVideo(
+        tryResolveExistingFilePath(resolvedPath),
+      )
+      if (!fs.existsSync(resolvedPath)) {
+        throw new Error(`File not found: ${resolvedPath}`)
+      }
+      const url = getLocalFileUrl(resolvedPath)
+      if (url) {
+        return { success: true, url, resolvedPath }
+      }
+      throw new Error(`File must be in app-data2 or assets directory`)
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('ensure-smartcut-preview-video', async (_, filePath: string) => {
+    try {
+      const resolvedPath = await ensureSmartcutPreviewVideo(
+        tryResolveExistingFilePath(filePath),
+      )
+      if (!fs.existsSync(resolvedPath)) {
+        return { success: false, error: '视频文件不存在' }
+      }
+      return { success: true, file_path: resolvedPath.replace(/\\/g, '/') }
+    } catch (error: any) {
+      return { success: false, error: error.message || '混剪素材转码失败' }
     }
   })
 
@@ -108,6 +218,27 @@ export function registerFileHandlers(): void {
       return { success: true, file_path: filePath.replace(/\\/g, '/') }
     } catch (error: any) {
       return { success: false, error: error.message || 'save failed' }
+    }
+  })
+
+  ipcMain.handle('copy-local-file-to-user-data', async (_, sourcePath: string, originalName: string, subPath = 'temp/reference-videos') => {
+    try {
+      if (!sourcePath || !fs.existsSync(sourcePath)) {
+        return { success: false, error: 'Source file not found' }
+      }
+
+      const targetDir = getUserDataPath(subPath)
+      const fileName = safeFileName(originalName || path.basename(sourcePath))
+      const ext = path.extname(fileName) || path.extname(sourcePath)
+      const baseName = path.basename(fileName, path.extname(fileName))
+      const destPath = path.join(targetDir, `${Date.now()}_${baseName}${ext}`)
+      fs.copyFileSync(sourcePath, destPath)
+      const removedVideoIds = subPath === 'temp/reference-videos'
+        ? cleanupMisroutedReferenceVideo(originalName || fileName)
+        : []
+      return { success: true, file_path: destPath.replace(/\\/g, '/'), removed_video_ids: removedVideoIds }
+    } catch (error: any) {
+      return { success: false, error: error.message || 'copy failed' }
     }
   })
 }

@@ -6,17 +6,10 @@ interface SidebarProps {
   onToggle?: () => void
   activeItem?: string
   onItemChange?: (id: string) => void
-  onAdClick?: () => void
 }
 
-const AD_ITEMS = new Set(['settings-data', 'settings-appearance'])
-
-export function Sidebar({ collapsed = false, onToggle, activeItem = 'home', onItemChange, onAdClick }: SidebarProps) {
+export function Sidebar({ collapsed = false, onToggle, activeItem = 'home', onItemChange }: SidebarProps) {
   const handleItemClick = (id: string) => {
-    if (AD_ITEMS.has(id)) {
-      onAdClick?.()
-      return
-    }
     onItemChange?.(id)
   }
 
@@ -33,7 +26,7 @@ export function Sidebar({ collapsed = false, onToggle, activeItem = 'home', onIt
     },
     {
       id: 'settings-data',
-      label: '素材库',
+      label: '素材中心',
       icon: (
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
@@ -41,9 +34,40 @@ export function Sidebar({ collapsed = false, onToggle, activeItem = 'home', onIt
         </svg>
       ),
     },
+    {
+      id: 'works',
+      label: '我的作品',
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="7" width="20" height="15" rx="2" ry="2"/>
+          <polyline points="17 2 12 7 7 2"/>
+        </svg>
+      ),
+    },
+    {
+      id: 'task-center',
+      label: '任务中心',
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+          <line x1="16" y1="2" x2="16" y2="6"/>
+          <line x1="8" y1="2" x2="8" y2="6"/>
+          <line x1="3" y1="10" x2="21" y2="10"/>
+        </svg>
+      ),
+    },
   ]
 
   const bottomItems = [
+    {
+      id: 'settings-api',
+      label: 'API 配置',
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+        </svg>
+      ),
+    },
     {
       id: 'settings-appearance',
       label: '界面外观',
@@ -70,7 +94,7 @@ export function Sidebar({ collapsed = false, onToggle, activeItem = 'home', onIt
         <div className="sidebar-logo-icon">
           <img src={logoImg} alt={BRAND.productName} width={32} height={32} style={{ borderRadius: 6 }} />
         </div>
-        {!collapsed && <span className="sidebar-logo-text">{BRAND.titleLeft}<em>{BRAND.titleMiddle}</em></span>}
+        {!collapsed && <span className="sidebar-logo-text">{BRAND.titleLeft}<em>{BRAND.titleMiddle}</em><small style={{ fontSize: '12px', marginLeft: '6px', fontWeight: 400 }}>{BRAND.titleRight}</small></span>}
       </div>
 
       {/* 主导航 */}

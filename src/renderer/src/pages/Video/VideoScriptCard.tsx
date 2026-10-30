@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 /* eslint-disable */
 import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react'
 import ReactDOM from 'react-dom'
@@ -11,7 +11,13 @@ import { AiLegalModal } from '../../components/AiLegalModal'
 import { TranslateModal } from '../../components/TranslateModal'
 import { PhoneModal } from '../../components/PhoneModal'
 import { CHANNEL } from '../../config/channel'
-import { useAd } from '../../components/AdContext'
+import {
+  formatDouyinProfileError,
+  applyResolvedDouyinProfile,
+  validateHomepageForTopicAnalysis,
+  normalizeDouyinUrlForDownloader,
+  DOUYIN_HOMEPAGE_HINT,
+} from '../../utils/douyinUrlHelpers'
 
 // API Services
 import { llmService } from '../../api/llm'
@@ -33,8 +39,55 @@ const LANG_NAME_MAP: Record<string, string> = {
 }
 const getLanguageName = (code: string) => LANG_NAME_MAP[code] || code
 
+function getPostDescription(post) {
+  if (!post || typeof post !== "object") return "";
+  return String(
+    post.desc ||
+      post.description ||
+      post.title ||
+      post.text ||
+      post.caption ||
+      post.content ||
+      "",
+  ).trim();
+}
+
+function buildPostDescLines(posts, limit = 30) {
+  return posts
+    .map(getPostDescription)
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((desc, idx) => `${idx + 1}. ${desc}`)
+    .join("\n");
+}
+
+const TOPIC_ANALYSIS_GUARDRAIL =
+  "必须严格依据下方真实视频文案归纳，不得编造与文案无关的行业、技术或热点话题；如果文案以读稿、口播、直播回放为主，应识别为读稿/口播类账号。";
+
 // Legal keywords pattern for compliance check
 const LEGAL_KEYWORDS_PATTERN = /最(?:好|佳|强|大|优|高|低|新|快|便宜|安全|先进|权威)|第一|唯一|首选|首个|冠军|顶[级尖]|极[致品]|王牌|绝对|100%|百分之百|完全(?:无|没)|永[远不]|万能|全能|治愈|根治|永不反弹|无效退款|药到病除|一次见效|国家级|世界级|驰名|特[供效]|专供|指定|销量第一|全网最|零风险|无副作用|纯天然|独一无二|史无前例|前所未有/g
+
+const LOCAL_LEGAL_REVIEW_RULES = [
+  { pattern: /全网最低价/g, replacement: "实惠价格", reason: "包含绝对化低价承诺，容易被认定为极限化广告用语" },
+  { pattern: /销量第一/g, replacement: "销量表现较好", reason: "涉及排名第一的广告声称，需充分证明" },
+  { pattern: /一考定终身/g, replacement: "一考影响深远", reason: "容易制造升学焦虑和绝对化结果判断" },
+  { pattern: /世界名校/g, replacement: "知名院校", reason: "名校背书表述较绝对，建议弱化" },
+  { pattern: /官方高中学籍/g, replacement: "高中学籍", reason: "官方背书类表述需明确资质依据" },
+  { pattern: /录取率直接翻倍/g, replacement: "录取机会有望提升", reason: "对录取效果作确定性承诺，存在夸大风险" },
+  { pattern: /直接翻倍/g, replacement: "有望提升", reason: "效果提升幅度过于确定，建议弱化" },
+  { pattern: /独享/g, replacement: "享有", reason: "排他性权益表述需充分证明" },
+  { pattern: /全程督学/g, replacement: "持续督学", reason: "服务覆盖范围过于绝对，建议弱化" },
+  { pattern: /全额奖学金/g, replacement: "奖学金", reason: "奖学金结果表述需避免暗示确定获得" },
+  { pattern: /国企联合高校办学/g, replacement: "联合办学", reason: "权威背书及合作办学表述需明确证明材料" },
+  { pattern: /国家级/g, replacement: "高规格", reason: "属于权威背书类敏感表述" },
+  { pattern: /世界级/g, replacement: "高水平", reason: "属于绝对化或权威背书类表述" },
+  { pattern: /唯一/g, replacement: "特色", reason: "排他性绝对化表述" },
+  { pattern: /第一/g, replacement: "领先", reason: "排名第一类表述需充分证明" },
+  { pattern: /100%|百分之百/g, replacement: "较高", reason: "绝对化承诺表述" },
+  { pattern: /零风险/g, replacement: "风险较低", reason: "绝对化风险承诺" },
+  { pattern: /治愈|根治|药到病除|一次见效/g, replacement: "改善", reason: "效果承诺过于绝对" },
+  { pattern: /最(?:好|佳|强|大|优|高|低|新|快|便宜|安全|先进|权威)/g, replacement: "较优", reason: "包含极限词，建议弱化" },
+]
 
 
 // Token refresh helper
@@ -60,8 +113,115 @@ const LANG_OPTIONS = [
   { value: 'ar', label: '阿拉伯语' },
 ]
 
+function toFilePreviewUrl(filePath) {
+  if (!filePath) return "";
+  if (/^https?:\/\//i.test(filePath) || /^file:\/\//i.test(filePath)) return filePath;
+  const normalized = String(filePath).replace(/\\/g, "/");
+  return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
+}
+
+function getImmediatePreviewUrl(sourcePath, file) {
+  if (sourcePath) return toFilePreviewUrl(sourcePath);
+  if (file && typeof URL !== "undefined" && URL.createObjectURL) {
+    return URL.createObjectURL(file);
+  }
+  return "";
+}
+
+async function copyReferenceVideoToUserData(sourcePath, fileName, file) {
+  if (window.api.copyLocalFileToUserData && sourcePath) {
+    return window.api.copyLocalFileToUserData(sourcePath, fileName, "temp/reference-videos");
+  }
+
+  if (sourcePath && window.api.readFileAsBase64 && window.api.saveFileFromBase64) {
+    const fileData = await window.api.readFileAsBase64(sourcePath);
+    const base64 = typeof fileData === "string" ? fileData : fileData?.base64;
+    if (base64) return window.api.saveFileFromBase64(base64, fileName, "temp/reference-videos");
+  }
+
+  if (file && window.api.saveFileFromBase64) {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = String(event.target?.result || "");
+        resolve(dataUrl.split(",")[1] || "");
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    if (base64) return window.api.saveFileFromBase64(base64, fileName, "temp/reference-videos");
+  }
+
+  return { success: true, file_path: sourcePath };
+}
+
+function stripModelJsonDecorators(content: string) {
+  return String(content ?? "")
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/g, "")
+    .trim();
+}
+
+function decodeLooseJsonString(value: string) {
+  return value.replace(/\\(["\\/bfnrt])/g, (_, ch) => {
+    switch (ch) {
+      case '"':
+        return '"';
+      case '\\':
+        return '\\';
+      case '/':
+        return '/';
+      case 'b':
+        return '\b';
+      case 'f':
+        return '\f';
+      case 'n':
+        return '\n';
+      case 'r':
+        return '\r';
+      case 't':
+        return '\t';
+      default:
+        return ch;
+    }
+  });
+}
+
+function extractModelStringField(content: string, field: string): string | null {
+  const cleaned = stripModelJsonDecorators(content);
+  if (!cleaned) return null;
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    const value = parsed?.[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  } catch {
+    // 继续尝试从模型输出中做容错提取
+  }
+
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const strictMatch = cleaned.match(
+    new RegExp(
+      `"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"(?=\\s*[},\\]]|\\s*$)`,
+    ),
+  );
+  if (strictMatch?.[1]) {
+    const value = decodeLooseJsonString(strictMatch[1]).trim();
+    if (value) return value;
+  }
+
+  const looseMatch = cleaned.match(
+    new RegExp(`"${escapedField}"\\s*:\\s*"([\\s\\S]*)"\\s*[}\\]]?\\s*$`),
+  );
+  if (looseMatch?.[1]) {
+    const value = decodeLooseJsonString(looseMatch[1]).trim();
+    if (value) return value;
+  }
+
+  return null;
+}
+
 export function VideoScriptCard() {
-  const { openAd } = useAd();
   const showToast = useToast();
   const phoneModal = usePhoneModal(false);
   const userInfo = useUserInfoStore((s) => s.userInfo);
@@ -88,6 +248,34 @@ export function VideoScriptCard() {
     llmModels,
   } = useVideoPageStore();
   const fixedLlmModel = (llmModels || [])[0]?.value || llmModel || "DeepSeek";
+  const requestTopicLlmContent = async (
+    messages,
+    options,
+    emptyMessage = "AI 暂未生成内容，请稍后重试",
+  ) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const data = await llmService.completion(fixedLlmModel, messages, {
+          ...options,
+          temperature:
+            attempt === 0
+              ? options?.temperature
+              : Math.max(0.5, Number(options?.temperature ?? 0.7) - 0.1),
+        });
+        const responseData = data.data || data;
+        const content = responseData?.choices?.[0]?.message?.content?.trim();
+        if (content) return content;
+        lastError = new Error(emptyMessage);
+      } catch (e) {
+        lastError = e;
+      }
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    throw lastError || new Error(emptyMessage);
+  };
   const filterWordLevelLegalEdits = (edits, sourceText) => {
     const result = [];
     for (const e of edits) {
@@ -142,6 +330,77 @@ export function VideoScriptCard() {
     const delta = Math.abs(rev.length - src.length);
     return delta > Math.max(24, Math.floor(src.length * 0.25));
   };
+  const buildLocalLegalReviewResult = (sourceText) => {
+    const ranges = [];
+    for (const rule of LOCAL_LEGAL_REVIEW_RULES) {
+      rule.pattern.lastIndex = 0;
+      for (const match of sourceText.matchAll(rule.pattern)) {
+        const original = match[0]?.trim();
+        if (!original) continue;
+        const start = match.index ?? sourceText.indexOf(original);
+        const end = start + original.length;
+        if (ranges.some((r) => start < r.end && end > r.start)) continue;
+        if (ranges.some((r) => r.edit.original === original)) continue;
+        ranges.push({
+          start,
+          end,
+          edit: {
+            original,
+            replacement: rule.replacement,
+            reason: rule.reason,
+          },
+        });
+      }
+    }
+    const edits = ranges
+      .sort((a, b) => a.start - b.start)
+      .map((range) => range.edit);
+    const reviewedText = edits.length
+      ? applyEditsToSourceText(sourceText, edits)
+      : sourceText;
+    const suggestions = edits.length
+      ? [
+          ...edits.map(
+            (edit) =>
+              `${edit.original} → ${edit.replacement}：${edit.reason}`,
+          ),
+          "AI 输出被截断时已启用本地基础合规词库兜底，建议发布前结合资质材料复核。",
+        ].join("\n")
+      : "文案未发现违禁词。\nAI 输出被截断时已启用本地基础合规词库兜底，建议发布前结合资质材料复核。";
+    return { reviewedText, suggestions, edits };
+  };
+  const shouldUseLocalLegalFallback = (error) => {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    return (
+      message.includes("模型输出被截断") ||
+      message.includes("未生成最终结果") ||
+      message.includes("未返回最终结果") ||
+      message.includes("API未返回有效结果") ||
+      message.includes("法务审核结果为空") ||
+      message.includes("AI 未返回有效结果") ||
+      message.includes("AI法务服务异常") ||
+      message.includes("法务模型接口请求失败") ||
+      message.includes("法务模型接口网络异常") ||
+      message.includes("HTTP 404") ||
+      message.includes("Unexpected token") ||
+      message.includes("Unexpected end of JSON input") ||
+      message.includes("Failed to fetch") ||
+      message.includes("NetworkError")
+    );
+  };
+  const mergeLegalEdits = (primary = [], secondary = []) => {
+    const merged = [];
+    const seen = new Set();
+    for (const edit of [...primary, ...secondary]) {
+      const original = (edit?.original || "").trim();
+      if (!original) continue;
+      const key = original.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(edit);
+    }
+    return merged;
+  };
   const [scriptMode, setScriptMode] = useState("learn");
   const IP_BRAIN_STORAGE_KEY = "qt-ip-brain-profiles";
   const [ipBrain, setIpBrain] = useState(null);
@@ -157,7 +416,7 @@ export function VideoScriptCard() {
         .filter((x) => x && typeof x === "object")
         .map((x) => ({
           id: String(x.id ?? Date.now() + Math.random()),
-          name: String(x.name ?? "未命名 借东风"),
+          name: String(x.name ?? "未命名 学灵感"),
           homepage: String(x.homepage ?? ""),
           createdAt: String(x.createdAt ?? ""),
           deepLearn: Boolean(x.deepLearn),
@@ -197,21 +456,24 @@ export function VideoScriptCard() {
     if (!posts.length) {
       setTopicError("未获取到可用的视频描述，无法分析选题。");
       setIsTopicAnalyzing(false);
-      return;
+      return null;
     }
     try {
-      const nonEmptyDescs = posts
-        .map((p) => (p.desc || "").trim())
-        .filter(Boolean);
-      const limitedDescs = nonEmptyDescs.slice(0, 30);
-      const joined = limitedDescs
-        .map((d, idx) => `${idx + 1}. ${d}`)
-        .join("\n");
+      const joined = buildPostDescLines(posts, 30);
+      if (!joined) {
+        setTopicError(
+          "未获取到视频文案，无法分析。读稿/直播类账号建议改用「解析视频」提取口播内容。",
+        );
+        setIsTopicAnalyzing(false);
+        return null;
+      }
       const systemPrompt =
         "你是一名资深抖音短视频内容策划和选题分析专家，擅长根据创作者近期视频的文案风格，总结账号定位与风格特点。";
       const userPrompt = `下面是某个抖音账号最近发布的视频文案（desc），每条一行：
 
 ${joined}
+
+${TOPIC_ANALYSIS_GUARDRAIL}
 
 请用中文简要总结该账号的整体风格和选题特点，要求：
 1. 只输出一段标题为【风格与定位分析】的文字内容；\n2. 正文控制在 3-6 行以内，语言简洁但有概括性；
@@ -220,15 +482,14 @@ ${joined}
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ];
-      const data = await llmService.completion(fixedLlmModel, messages, {
-        temperature: 0.65,
-        max_tokens: 1200,
-      });
-      const responseData = data.data || data;
-      const content = responseData?.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        throw new Error("AI 未返回有效结果");
-      }
+      const content = await requestTopicLlmContent(
+        messages,
+        {
+          temperature: 0.65,
+          max_tokens: 1200,
+        },
+        "风格分析暂未生成有效内容，请稍后重试",
+      );
       const raw = content.replace(/\uFEFF/g, "").trim();
       let stylePart = raw;
       const styleIndex = raw.indexOf("【风格与定位分析】");
@@ -239,15 +500,17 @@ ${joined}
       }
       setTopicStyleText(stylePart);
       setTopicError(null);
+      return stylePart;
     } catch (e) {
-      console.error("借东风风格分析失败", e);
+      console.error("学灵感风格分析失败", e);
       setTopicError(e?.message || "风格与定位分析失败，请稍后重试");
+      return null;
     } finally {
       setIsTopicAnalyzing(false);
       setTopicStage("idle");
     }
   };
-  const runTopicIdeasWithPosts = async (posts, reason) => {
+  const runTopicIdeasWithPosts = async (posts, reason, styleTextOverride) => {
     if (!posts.length) {
       setTopicError("未获取到可用的视频描述，无法分析选题。");
       setIsTopicAnalyzing(false);
@@ -255,40 +518,44 @@ ${joined}
       return;
     }
     try {
-      const nonEmptyDescs = posts
-        .map((p) => (p.desc || "").trim())
-        .filter(Boolean);
-      const limitedDescs = nonEmptyDescs.slice(0, 30);
-      const joined = limitedDescs
-        .map((d, idx) => `${idx + 1}. ${d}`)
-        .join("\n");
+      const joined = buildPostDescLines(posts, 30);
+      if (!joined) {
+        setTopicError(
+          "未获取到视频文案，无法生成推荐选题。读稿/直播类账号建议改用「解析视频」。",
+        );
+        setIsTopicAnalyzing(false);
+        setTopicStage("idle");
+        return;
+      }
+      const effectiveStyleText = styleTextOverride ?? topicStyleText;
       const systemPrompt =
         "你是一名资深抖音短视频内容策划和选题分析专家，擅长根据账号的既有风格与定位，给出高质量的后续选题建议。";
       const userPrompt = `下面是该账号的【风格与定位分析】：
 
-${topicStyleText || "（风格分析略）"}
+${effectiveStyleText || "（风格分析略）"}
 
 这是该账号最近发布的一批视频文案（desc）：
 
 ${joined}
 
+${TOPIC_ANALYSIS_GUARDRAIL}
+
 请在保持上述风格与定位不变的前提下，给出 5 个新的后续推荐选题，要求：
 1. 只输出标题为【推荐选题】的部分；\n2. 严格给出 5 条，按「1、2、3、4、5」编号；
-3. 每个推荐选题用一句话描述清楚拍什么内容，尽量贴近原账号的说话方式和世界观；\n4. 不要重复上一批已经出现过的表述；
+3. 每个推荐选题用一句话描述清楚拍什么内容，必须贴近上述文案的实际主题与表达方式；\n4. 不要重复上一批已经出现过的表述；
 5. 不要输出与平台规则明显冲突的内容。\n6. 不要输出任何emoji和特殊标点符号。`;
       const messages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ];
-      const data = await llmService.completion(fixedLlmModel, messages, {
-        temperature: reason === "initial" ? 0.75 : 0.9,
-        max_tokens: 800,
-      });
-      const responseData = data.data || data;
-      const content = responseData?.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        throw new Error("AI 未返回有效结果");
-      }
+      const content = await requestTopicLlmContent(
+        messages,
+        {
+          temperature: reason === "initial" ? 0.65 : 0.7,
+          max_tokens: 800,
+        },
+        "推荐选题暂未生成有效内容，请点击换一批重试",
+      );
       const raw = content.replace(/\uFEFF/g, "").trim();
       const ideaLines = raw.split("\n").map((l) => l.trim());
       const collected = [];
@@ -306,7 +573,7 @@ ${joined}
       setTopicScripts([]);
       setTopicError(null);
     } catch (e) {
-      console.error("借东风推荐选题失败:", e);
+      console.error("学灵感推荐选题失败:", e);
       setTopicError(e?.message || "推荐选题生成失败，请稍后重试");
     } finally {
       setIsTopicAnalyzing(false);
@@ -315,7 +582,12 @@ ${joined}
   };
   const handleOpenTopicAnalysis = async () => {
     if (!ipBrain || !ipBrain.homepage.trim()) {
-      showToast("请先在 借东风中填写主页地址", "info");
+      showToast("请先在学灵感中填写主页地址", "info");
+      return;
+    }
+    const homepageCheck = validateHomepageForTopicAnalysis(ipBrain.homepage);
+    if (!homepageCheck.ok) {
+      showToast(homepageCheck.hint || DOUYIN_HOMEPAGE_HINT, "info");
       return;
     }
     setShowTopicModal(true);
@@ -328,28 +600,58 @@ ${joined}
     setTopicError(null);
     try {
       const result = await window.api.downloadDouyinUserPosts(
-        ipBrain.homepage.trim(),
+        normalizeDouyinUrlForDownloader(ipBrain.homepage.trim()) ||
+          ipBrain.homepage.trim(),
       );
       if (!result?.success) {
         throw new Error(
-          result?.message || result?.error || "获取抖音主页视频失败",
+          formatDouyinProfileError(
+            result?.message || result?.error,
+            ipBrain.homepage,
+          ) || "获取抖音主页视频失败",
         );
       }
+      applyResolvedDouyinProfile(
+        result,
+        ipBrain.id,
+        setIpBrain,
+        setIpBrainProfiles,
+        showToast,
+      );
       const posts = result.posts;
       if (!posts || !posts.length) {
         throw new Error("未获取到该账号的近期视频列表");
       }
       setTopicPostsSnapshot(posts);
-      await runTopicStyleAnalysisWithPosts(posts);
+      const styleText = await runTopicStyleAnalysisWithPosts(posts);
+      if (!styleText) {
+        setIsTopicAnalyzing(false);
+        setTopicStage("idle");
+        return;
+      }
       setIsTopicAnalyzing(true);
       setTopicStage("ideas");
-      await runTopicIdeasWithPosts(posts, "initial");
+      await runTopicIdeasWithPosts(posts, "initial", styleText);
     } catch (e) {
       console.error("获取抖音主页视频失败:", e);
-      setTopicError(e?.message || "获取抖音主页视频失败");
+      setTopicError(
+        formatDouyinProfileError(e?.message, ipBrain?.homepage) ||
+          "获取抖音主页视频失败",
+      );
       setIsTopicAnalyzing(false);
       setTopicStage("idle");
     }
+  };
+  const handleCancelTopicAnalysis = () => {
+    setShowTopicModal(false);
+    setIsTopicAnalyzing(false);
+    setIsTopicScriptsLoading(false);
+    setTopicStage("idle");
+    setTopicError(null);
+  };
+  const handleRemoveIpBrain = () => {
+    setIpBrain(null);
+    handleCancelTopicAnalysis();
   };
   const handleRefreshTopicIdeas = async () => {
     if (!topicPostsSnapshot || !topicPostsSnapshot.length) {
@@ -359,22 +661,39 @@ ${joined}
         setTopicError(null);
         try {
           const result = await window.api.downloadDouyinUserPosts(
-            ipBrain.homepage.trim(),
+            normalizeDouyinUrlForDownloader(ipBrain.homepage.trim()) ||
+              ipBrain.homepage.trim(),
           );
           if (!result?.success) {
             throw new Error(
-              result?.message || result?.error || "获取抖音主页视频失败",
+              formatDouyinProfileError(
+                result?.message || result?.error,
+                ipBrain.homepage,
+              ) || "获取抖音主页视频失败",
             );
           }
+          applyResolvedDouyinProfile(
+            result,
+            ipBrain.id,
+            setIpBrain,
+            setIpBrainProfiles,
+            showToast,
+          );
           const posts = result.posts;
           if (!posts || !posts.length) {
             throw new Error("未获取到该账号的近期视频列表");
           }
           setTopicPostsSnapshot(posts);
-          await runTopicIdeasWithPosts(posts, "refresh");
+          const styleText = await runTopicStyleAnalysisWithPosts(posts);
+          if (styleText) {
+            await runTopicIdeasWithPosts(posts, "refresh", styleText);
+          }
         } catch (e) {
           console.error("刷新选题分析失败:", e);
-          setTopicError(e?.message || "刷新选题分析失败");
+          setTopicError(
+            formatDouyinProfileError(e?.message, ipBrain?.homepage) ||
+              "刷新选题分析失败",
+          );
           setIsTopicAnalyzing(false);
           setTopicStage("idle");
         }
@@ -386,7 +705,7 @@ ${joined}
     setTopicError(null);
     setSelectedTopic(null);
     setTopicScripts([]);
-    await runTopicIdeasWithPosts(topicPostsSnapshot, "refresh");
+    await runTopicIdeasWithPosts(topicPostsSnapshot, "refresh", topicStyleText);
   };
   const handleGenerateScriptsForTopic = async (topic, reason = "initial") => {
     if (!topic) return;
@@ -414,15 +733,14 @@ ${topicStyleText || "（风格分析略）"}
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ];
-      const data = await llmService.completion(fixedLlmModel, messages, {
-        temperature: reason === "initial" ? 0.85 : 0.95,
-        max_tokens: 1600,
-      });
-      const responseData = data.data || data;
-      const content = responseData?.choices?.[0]?.message?.content?.trim();
-      if (!content) {
-        throw new Error("AI 未返回有效结果");
-      }
+      const content = await requestTopicLlmContent(
+        messages,
+        {
+          temperature: reason === "initial" ? 0.85 : 0.95,
+          max_tokens: 1600,
+        },
+        "选题文案暂未生成有效内容，请稍后重试",
+      );
       const raw = content.replace(/\uFEFF/g, "").trim();
       const lines = raw.split("\n").map((l) => l.trim());
       const collected = [];
@@ -486,6 +804,26 @@ ${topicStyleText || "（风格分析略）"}
   const extractIntervalRef = useRef(null);
   const rewriteIntervalRef = useRef(null);
   const aiLegalIntervalRef = useRef(null);
+  const extractHasBackendProgressRef = useRef(false);
+  useEffect(() => {
+    if (typeof window.api.onPluginProxyProgress !== "function") return;
+    const off = window.api.onPluginProxyProgress((data) => {
+      if (data.pluginName !== "plugin-proxy-whisper") return;
+      if (data.type === "job_progress") {
+        const pg = Math.max(0, Math.min(100, Number(data.progress || 0)));
+        const state = String(data.state || "");
+        if (pg > 0) {
+          if (state === "running" || state === "succeeded") {
+            extractHasBackendProgressRef.current = true;
+          }
+          setExtractProgress((prev) => Math.max(prev, pg));
+        }
+      } else if (data.type === "queue_done") {
+        extractHasBackendProgressRef.current = false;
+      }
+    });
+    return off;
+  }, []);
   useEffect(() => {
     return () => {
       if (downloadIntervalRef.current)
@@ -496,10 +834,177 @@ ${topicStyleText || "（风格分析略）"}
     };
   }, []);
   const handleDownloadVideo = async () => {
-    openAd();
+    if (isDownloading) return;
+    if (!inputVideoUrl.trim()) {
+      showToast("请输入视频链接", "info");
+      return;
+    }
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setVideoUrl("");
+    let progress = 0;
+    const progressInterval = setInterval(() => {
+      progress += Math.random() * 5;
+      if (progress < 90) setDownloadProgress(Math.round(progress));
+    }, 500);
+    const downloadTraceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (userInfo?.phone) {
+      exceptionService.submitException({
+        cardNum: userInfo.phone,
+        feature: "script_download",
+        traceId: downloadTraceId,
+        eventType: "start",
+        exceptionInfo: "",
+      });
+    }
+    try {
+      const result = await window.api.downloadDouyinVideo(inputVideoUrl.trim());
+      console.log("Download result:", result);
+      clearInterval(progressInterval);
+      setDownloadProgress(100);
+      if (result.success && result.file_path) {
+        setPreviewVideoFilePath(result.file_path);
+        try {
+          const res = await window.api.getLocalFileUrl(result.file_path);
+          if (!res.success) throw new Error(res.error || "无法播放");
+          setVideoUrl(res.url || "");
+        } catch (error) {
+          console.error("Failed to load video:", error);
+          showToast(`视频下载成功，加载预览失败 ${error}`, "error");
+        }
+        setIsDownloading(false);
+        await runExtractScriptForFile(result.file_path);
+        if (userInfo?.phone) {
+          exceptionService.submitException({
+            cardNum: userInfo.phone,
+            feature: "script_download",
+            traceId: downloadTraceId,
+            eventType: "end",
+            exceptionInfo: "",
+          });
+        }
+      } else {
+        showToast(
+          `下载失败: ${result.message || result.error || "未知错误"}`,
+          "error",
+        );
+        if (userInfo?.phone) {
+          exceptionService.submitException({
+            cardNum: userInfo.phone,
+            feature: "script_download",
+            traceId: downloadTraceId,
+            eventType: "exception",
+            exceptionInfo: JSON.stringify(result),
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Download video failed:", error);
+      const err = error;
+      clearInterval(progressInterval);
+      showToast(`下载失败: ${err.message || err.error || "未知错误"}`, "error");
+      if (userInfo?.phone) {
+        exceptionService.submitException({
+          cardNum: userInfo.phone,
+          feature: "script_download",
+          traceId: downloadTraceId,
+          eventType: "exception",
+          exceptionInfo: JSON.stringify(error),
+        });
+      }
+    } finally {
+      setIsDownloading(false);
+      if (downloadIntervalRef.current) {
+        clearInterval(downloadIntervalRef.current);
+        downloadIntervalRef.current = null;
+      }
+    }
+  };
+  const handleLocalVideoPath = async (sourcePath, fileName, file) => {
+    window.api.logToMain?.("[ReferenceVideo] handleLocalVideoPath", {
+      sourcePath,
+      fileName,
+      hasFile: Boolean(file),
+    });
+    if (!sourcePath && !file) {
+      showToast("无法获取本地视频路径，请通过客户端选择本地文件上传", "error");
+      return;
+    }
+    setUploadFileName(fileName);
+    const ext = fileName.toLowerCase().split(".").pop();
+    if (ext !== "mp4") {
+      showToast("只支持上传MP4格式的视频文案", "info");
+      return;
+    }
+    const immediatePreviewUrl = getImmediatePreviewUrl(sourcePath, file);
+    if (immediatePreviewUrl) {
+      setVideoUrl(immediatePreviewUrl);
+      if (sourcePath) setPreviewVideoFilePath(sourcePath);
+      showToast("参考视频已选择，正在提取内容...", "success");
+    }
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    try {
+      const saveResult = await copyReferenceVideoToUserData(sourcePath, fileName, file);
+      if (saveResult.success && saveResult.file_path) {
+        try {
+          const refreshedVideos = await window.api.loadUploadedVideosConfig?.();
+          const videos = refreshedVideos?.videos ?? [];
+          const store = useVideoPageStore.getState();
+          store.setUploadedVideos?.(videos);
+          store.setSelectedVideoMaterialId?.("");
+        } catch (refreshError) {
+          console.warn("Refresh uploaded videos after reference upload failed:", refreshError);
+        }
+        const result = await window.api.getLocalFileUrl(saveResult.file_path);
+        setVideoUrl(
+          result.success && result.url
+            ? result.url
+            : toFilePreviewUrl(saveResult.file_path || sourcePath),
+        );
+        setPreviewVideoFilePath(saveResult.file_path);
+        setDownloadProgress(100);
+        await runExtractScriptForFile(saveResult.file_path);
+      } else {
+        showToast(`保存文件失败: ${saveResult.error || "未知错误"}`, "error");
+      }
+    } catch (error) {
+      console.error("保存文件失败", error);
+      const err = error;
+      showToast(`保存文件失败: ${err.message || "未知错误"}`, "error");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+  const handleChooseVideoFile = async () => {
+    if (isDownloading || isExtracting) return;
+    try {
+      window.api.logToMain?.("[ReferenceVideo] open select dialog");
+      const selected = await window.api.selectFile({
+        title: "选择本地参考视频",
+        filters: [{ name: "MP4视频", extensions: ["mp4"] }],
+      });
+      window.api.logToMain?.("[ReferenceVideo] select dialog result", selected);
+      const sourcePath =
+        typeof selected === "string"
+          ? selected
+          : Array.isArray(selected)
+            ? selected[0]
+            : selected?.filePaths?.[0] || selected?.filePath || selected?.path;
+      if (!sourcePath) return;
+      const fileName = sourcePath.split(/[\\/]/).pop() || "uploaded.mp4";
+      await handleLocalVideoPath(sourcePath, fileName);
+    } catch (error) {
+      console.error("选择视频失败", error);
+      const err = error;
+      showToast(`选择视频失败: ${err.message || "未知错误"}`, "error");
+    }
   };
   const handleVideoFileSelect = async (event) => {
-    openAd();
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await handleLocalVideoPath(file.path, file.name, file);
+    event.target.value = "";
   };
   const runExtractScriptForFile = async (filePath) => {
     if (isExtracting) return;
@@ -507,10 +1012,12 @@ ${topicStyleText || "（风格分析略）"}
     setIsExtracting(true);
     setExtractProgress(0);
     setOriginalScript("");
+    extractHasBackendProgressRef.current = false;
     let progress = 0;
     const progressInterval = setInterval(() => {
+      if (extractHasBackendProgressRef.current) return;
       progress += Math.random() * 5;
-      if (progress < 90) setExtractProgress(Math.round(progress));
+      if (progress < 90) setExtractProgress((prev) => Math.max(prev, Math.round(progress)));
     }, 500);
     extractIntervalRef.current = progressInterval;
     const extractTraceId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -527,14 +1034,14 @@ ${topicStyleText || "（风格分析略）"}
       await refreshTokenOnce();
 
       let transcribeInputPath = filePath;
-      const compressedAudioResult =
+      const enhancedAudioResult =
         await window.api.extractVideoAudioForTranscribe(filePath);
-      if (compressedAudioResult.success && compressedAudioResult.file_path) {
-        transcribeInputPath = compressedAudioResult.file_path;
+      if (enhancedAudioResult.success && enhancedAudioResult.file_path) {
+        transcribeInputPath = enhancedAudioResult.file_path;
       } else {
         console.warn(
           "[Whisper] extractVideoAudioForTranscribe failed, fallback to original file:",
-          compressedAudioResult.error,
+          enhancedAudioResult.error,
         );
       }
 
@@ -562,7 +1069,7 @@ ${topicStyleText || "（风格分析略）"}
       const err = error;
       showToast(
         err.message?.includes("fetch failed")
-          ? "请联系客服人员，激活账号"
+          ? "连接试用节点失败，请检查网络后重试"
           : `提取失败: ${err.message || "未知错误"}`,
         "error",
       );
@@ -584,12 +1091,76 @@ ${topicStyleText || "（风格分析略）"}
     }
   };
   const handleRewriteScript = async () => {
-    openAd();
+    if (isRewriting) return;
+    if (!originalScript.trim()) {
+      showToast("请先提取视频文案或输入原文案", "info");
+      return;
+    }
+    setIsRewriting(true);
+    setRewriteProgress(0);
+    setRewrittenScript("");
+    setTranslatedText("");
+    let progress = 0;
+    const progressInterval = setInterval(() => {
+      progress += Math.random() * 5;
+      if (progress < 90) setRewriteProgress(Math.round(progress));
+    }, 500);
+    try {
+      const langName = getLanguageName(sourceLanguage);
+      const lengthNum = parseInt(learnLength.trim(), 10);
+      const safeLengthBase =
+        Number.isFinite(lengthNum) && lengthNum > 0 ? lengthNum : 150;
+      const rewriteLength = Math.max(0, Math.min(1e3, safeLengthBase));
+      const { systemPrompt, userPrompts } =
+        await templateService.getParsedTemplate("rewrite", {
+          langName,
+          originalScript,
+          targetLength: String(rewriteLength),
+        });
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...userPrompts.map((prompt) => ({ role: "user", content: prompt })),
+      ];
+      const data = await llmService.completion(fixedLlmModel, messages, {
+        temperature: 0.7,
+        max_tokens: 2e3,
+      });
+      clearInterval(progressInterval);
+      setRewriteProgress(100);
+      const responseData = data.data || data;
+      if (responseData.choices?.[0]?.message?.content) {
+        const content = responseData.choices[0].message.content;
+        try {
+          const result = JSON.parse(content.trim());
+          if (result.rewrittenText) setRewrittenScript(result.rewrittenText);
+          else throw new Error("API返回格式异常");
+        } catch (error) {
+          console.error(
+            "Parse JSON failed, trying to extract from text:",
+            error,
+          );
+          const rewrittenText = extractModelStringField(
+            content,
+            "rewrittenText",
+          );
+          if (rewrittenText) setRewrittenScript(rewrittenText);
+          else throw new Error("无法解析仿写结果");
+        }
+      } else throw new Error("API未返回有效结果");
+    } catch (error) {
+      console.error("Rewrite script failed:", error);
+      const err = error;
+      clearInterval(progressInterval);
+      showToast(`仿写失败: ${err.message || "未知错误"}`, "error");
+    } finally {
+      setIsRewriting(false);
+      if (rewriteIntervalRef.current) {
+        clearInterval(rewriteIntervalRef.current);
+        rewriteIntervalRef.current = null;
+      }
+    }
   };
   const handleGenerateOriginalScript = async () => {
-    openAd();
-  };
-  const _handleGenerateOriginalScript_disabled = async () => {
     if (isGeneratingOriginal) return;
     const product = originalProductInfo.trim();
     if (!product) {
@@ -650,13 +1221,74 @@ ${topicStyleText || "（风格分析略）"}
     }
   };
   const handleTranslate = async () => {
-    openAd();
+    if (isTranslating) return;
+    const scriptContent = rewrittenScript.trim();
+    if (!scriptContent) {
+      showToast("请先输入文案", "info");
+      return;
+    }
+    setIsTranslating(true);
+    setTranslateProgress(0);
+    setTranslatedText("");
+    let progress = 0;
+    const progressInterval = setInterval(() => {
+      progress += Math.random() * 5;
+      if (progress < 90) setTranslateProgress(Math.round(progress));
+    }, 500);
+    try {
+      const sourceLangName = getLanguageName(sourceLanguage);
+      const targetLangName = getLanguageName(targetLanguage);
+      const { systemPrompt, userPrompts } =
+        await templateService.getParsedTemplate("translate", {
+          sourceLangName,
+          targetLangName,
+          scriptContent,
+        });
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...userPrompts.map((prompt) => ({ role: "user", content: prompt })),
+      ];
+      const data = await llmService.completion(fixedLlmModel, messages, {
+        temperature: 0.3,
+        max_tokens: 2e3,
+      });
+      clearInterval(progressInterval);
+      setTranslateProgress(100);
+      const responseData = data.data || data;
+      if (responseData.choices?.[0]?.message?.content) {
+        setTranslatedText(
+          responseData.choices[0].message.content
+            .replace(/```[\s\S]*?```/g, "")
+            .trim(),
+        );
+      } else throw new Error("API未返回有效结果");
+    } catch (error) {
+      console.error("Translate failed:", error);
+      const err = error;
+      clearInterval(progressInterval);
+      showToast(`翻译失败: ${err.message || "未知错误"}`, "error");
+    } finally {
+      setIsTranslating(false);
+    }
   };
   const handleOpenTranslateModal = () => {
-    openAd();
+    if (!rewrittenScript.trim()) {
+      showToast("请先生成文案", "info");
+      return;
+    }
+    setShowTranslateModal(true);
   };
   const handleOpenAiLegalModal = () => {
-    openAd();
+    const scriptContent = rewrittenScript.trim() || originalScript.trim();
+    if (!scriptContent) {
+      showToast("请先输入文案内容或提取视频文案", "info");
+      return;
+    }
+    setAiLegalReviewedText("");
+    setAiLegalSuggestions("");
+    setAiLegalEdits([]);
+    setAiLegalProgress(0);
+    setShowAiLegalModal(true);
   };
   const handleCloseTranslateModal = () => {
     setShowTranslateModal(false);
@@ -678,7 +1310,7 @@ ${topicStyleText || "（风格分析略）"}
       setRewrittenScript(reviewedText.trim());
       setTranslatedText("");
       setShowTranslatedInTextarea(false);
-      showToast("已应用 AI 法务审核后的文案", "success");
+      showToast("已应用合规审查后的文案", "success");
     }
   };
   const handleToggleTranslatedText = () => {
@@ -693,7 +1325,15 @@ ${topicStyleText || "（风格分析略）"}
   const openPreview = () => phoneModal.openPhoneModal(videoUrl);
   const shouldShowPreviewDownload = String(CHANNEL.id) === "jiuzhe";
   const handleDownloadPreviewVideo = async () => {
-    openAd();
+    const path = previewVideoFilePath;
+    if (!path) {
+      showToast("无可下载的视频", "info");
+      return;
+    }
+    const result = await window.api.saveLocalFileAs(path);
+    if (result.canceled) return;
+    if (result.success && result.filePath) showToast("视频已保存", "success");
+    else showToast(result.error || "保存失败", "error");
   };
   const toggleMode = () => {
     setIsUploadMode(!isUploadMode);
@@ -734,9 +1374,9 @@ ${topicStyleText || "（风格分析略）"}
         { role: "system", content: systemPrompt || "你是一名专业法务审核员。" },
         ...userPrompts.map((p) => ({ role: "user", content: p })),
       ];
-      const data = await llmService.completion(fixedLlmModel, messages, {
-        temperature: 0.3,
-        max_tokens: 2200,
+      const data = await llmService.legalReviewCompletion(messages, {
+        temperature: 0.1,
+        max_tokens: 6000,
       });
       clearInterval(progressInterval);
       aiLegalIntervalRef.current = null;
@@ -763,14 +1403,41 @@ ${topicStyleText || "（风格分析略）"}
             reason: (e?.reason ?? "").toString(),
           }))
           .filter((e) => e.original && (e.replacement || e.reason));
-        const wordLevelEdits = filterWordLevelLegalEdits(
+        const aiWordLevelEdits = filterWordLevelLegalEdits(
           normalized,
           scriptContent,
         );
+        const localReview = buildLocalLegalReviewResult(scriptContent);
+        const wordLevelEdits = mergeLegalEdits(
+          aiWordLevelEdits,
+          localReview.edits,
+        );
         if (wordLevelEdits.length > 0) {
           nextReviewed = applyEditsToSourceText(scriptContent, wordLevelEdits);
+          const localOnly = localReview.edits.filter(
+            (localEdit) =>
+              !aiWordLevelEdits.some(
+                (aiEdit) =>
+                  aiEdit.original.toLowerCase() ===
+                  localEdit.original.toLowerCase(),
+              ),
+          );
+          if (localOnly.length > 0) {
+            const note = [
+              `本地词库补充 ${localOnly.length} 处风险词，避免 AI 漏报。`,
+              ...localOnly.map(
+                (edit) =>
+                  `${edit.original} → ${edit.replacement}：${edit.reason}`,
+              ),
+            ].join("\n");
+            nextSuggestions = nextSuggestions
+              ? `${nextSuggestions}
+
+${note}`
+              : note;
+          }
           if (isReviewedTextOverwritten(scriptContent, reviewed)) {
-            const note = "已自动约束为词级法务替换，避免整句改写。";
+            const note = "已自动约束为词级合规替换，避免整句改写。";
             nextSuggestions = nextSuggestions
               ? `${nextSuggestions}
 
@@ -790,10 +1457,12 @@ ${note}`
         setAiLegalSuggestions(nextSuggestions);
         setAiLegalEdits(wordLevelEdits);
       } catch (e) {
-        setAiLegalReviewedText(cleaned);
+        const fallback = buildLocalLegalReviewResult(scriptContent);
+        setAiLegalReviewedText(fallback.reviewedText);
         setAiLegalSuggestions(
-          "（解析失败：未能提取结构化“修改意见”。如需，请点击“重新审核”。）",
+          `${fallback.suggestions}\nAI 返回内容无法解析，已使用本地基础合规词库兜底。`,
         );
+        setAiLegalEdits(fallback.edits);
       }
     } catch (error) {
       console.error("AI legal review failed:", error);
@@ -802,7 +1471,16 @@ ${note}`
         clearInterval(aiLegalIntervalRef.current);
         aiLegalIntervalRef.current = null;
       }
-      showToast(`AI法务失败: ${err.message || "未知错误"}`, "error");
+      if (shouldUseLocalLegalFallback(err)) {
+        const fallback = buildLocalLegalReviewResult(scriptContent);
+        setAiLegalProgress(100);
+        setAiLegalReviewedText(fallback.reviewedText);
+        setAiLegalSuggestions(fallback.suggestions);
+        setAiLegalEdits(fallback.edits);
+        showToast("法务模型接口异常，已使用本地词库完成基础审查", "info");
+        return;
+      }
+      showToast(`合规审查失败: ${err.message || "未知错误"}`, "error");
     } finally {
       setIsAiLegalReviewing(false);
     }
@@ -856,7 +1534,7 @@ ${note}`
                         "aria-selected": scriptMode === "learn",
                         className: `script-mode-tab ${scriptMode === "learn" ? "active" : ""}`,
                         onClick: () => setScriptMode("learn"),
-                        children: "拆解参考",
+                        children: "解析视频",
                       }),
                       jsxRuntimeExports.jsx("button", {
                         type: "button",
@@ -864,7 +1542,7 @@ ${note}`
                         "aria-selected": scriptMode === "ipBrain",
                         className: `script-mode-tab ${scriptMode === "ipBrain" ? "active" : ""}`,
                         onClick: () => setScriptMode("ipBrain"),
-                        children: "借灵感",
+                        children: "学灵感",
                       }),
                       jsxRuntimeExports.jsx("button", {
                         type: "button",
@@ -872,7 +1550,7 @@ ${note}`
                         "aria-selected": scriptMode === "original",
                         className: `script-mode-tab ${scriptMode === "original" ? "active" : ""}`,
                         onClick: () => setScriptMode("original"),
-                        children: "从零起稿",
+                        children: "从零策划",
                       }),
                     ],
                   }),
@@ -987,6 +1665,7 @@ ${note}`
                                       className: `video-file-input video-file-input-wrap ${isDownloading || isExtracting ? "disabled" : ""}`,
                                       title:
                                         uploadFileName || "上传视频提取参考内容",
+                                      onClick: handleChooseVideoFile,
                                       children: [
                                         jsxRuntimeExports.jsx(
                                           "span",
@@ -995,17 +1674,6 @@ ${note}`
                                             children:
                                               uploadFileName ||
                                               "上传视频提取参考内容",
-                                          },
-                                        ),
-                                        jsxRuntimeExports.jsx(
-                                          "input",
-                                          {
-                                            type: "file",
-                                            accept: "video/mp4,.mp4",
-                                            onChange: handleVideoFileSelect,
-                                            disabled:
-                                              isDownloading || isExtracting,
-                                            className: "video-file-input-real",
                                           },
                                         ),
                                       ],
@@ -1147,7 +1815,7 @@ ${note}`
                                       onClick: handleDownloadVideo,
                                       disabled: isDownloading || isExtracting,
                                       className:
-                                        "video-button video-button-primary",
+                                        `video-button video-button-primary ${isDownloading || isExtracting ? "video-button-progress-active" : ""}`,
                                       style: {
                                         whiteSpace: "nowrap",
                                         width: "auto",
@@ -1166,11 +1834,11 @@ ${note}`
                               }),
                           (isDownloading || isExtracting) &&
                             jsxRuntimeExports.jsx("div", {
-                              className: "video-progress",
+                              className: `video-progress ${(isDownloading || isExtracting) ? "video-progress--active" : ""}`,
                               children: jsxRuntimeExports.jsx(
                                 "div",
                                 {
-                                  className: "video-progress-bar",
+                                  className: `video-progress-bar ${(isDownloading || isExtracting) ? "video-progress-bar--active" : ""}`,
                                   style: {
                                     width: `${isExtracting ? extractProgress : downloadProgress}%`,
                                   },
@@ -1565,7 +2233,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsx("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: jsxRuntimeExports.jsx("path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }) }),
-                                  "AI法务",
+                                  "合规审查",
                                 ],
                               }),
                               jsxRuntimeExports.jsxs("button", {
@@ -1574,7 +2242,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsxs("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "10" }), jsxRuntimeExports.jsx("line", { x1: "2", y1: "12", x2: "22", y2: "12" }), jsxRuntimeExports.jsx("path", { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" })] }),
-                                  "翻译文案",
+                                  "语种翻译",
                                 ],
                               }),
                             ],
@@ -1601,7 +2269,7 @@ ${note}`
                                   children: [
                                     jsxRuntimeExports.jsx("p", {
                                       className: "ipbrain-placeholder-title",
-                                      children: "还没有配置借灵感",
+                                      children: "还没有配置学灵感",
                                     }),
                                     jsxRuntimeExports.jsx("p", {
                                       className: "ipbrain-placeholder-desc",
@@ -1615,7 +2283,7 @@ ${note}`
                                         className:
                                           "video-button video-button-primary",
                                         onClick: () =>
-                                          openAd(),
+                                          setShowIpBrainModal(true),
                                         children: [jsxRuntimeExports.jsx("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("line", { x1: "12", y1: "5", x2: "12", y2: "19" }), jsxRuntimeExports.jsx("line", { x1: "5", y1: "12", x2: "19", y2: "12" })] }), "添加灵感来源"],
                                       },
                                     ),
@@ -1717,7 +2385,7 @@ ${note}`
                                                 e.currentTarget.style.color =
                                                   "var(--ly-text-3)";
                                               },
-                                              onClick: () => setIpBrain(null),
+                                              onClick: handleRemoveIpBrain,
                                               children:
                                                 jsxRuntimeExports.jsxs(
                                                   "svg",
@@ -1789,25 +2457,39 @@ ${note}`
                                         ],
                                       },
                                     ),
-                                    jsxRuntimeExports.jsx(
+                                    jsxRuntimeExports.jsxs(
                                       "div",
                                       {
                                         className: "ipbrain-card-footer-bottom",
-                                        children:
-                                          jsxRuntimeExports.jsx(
-                                            "button",
-                                            {
-                                              type: "button",
-                                              className:
-                                                "video-button video-button-primary",
-                                              style: {
-                                                width: "100%",
-                                                whiteSpace: "nowrap",
-                                              },
-                                              onClick: handleOpenTopicAnalysis,
-                                              children: "方向分析",
+                                        style: {
+                                          display: "flex",
+                                          gap: 8,
+                                          width: "100%",
+                                        },
+                                        children: [
+                                          jsxRuntimeExports.jsx("button", {
+                                            type: "button",
+                                            className:
+                                              "video-button video-button-outline",
+                                            style: {
+                                              flex: 1,
+                                              whiteSpace: "nowrap",
                                             },
-                                          ),
+                                            onClick: handleRemoveIpBrain,
+                                            children: "取消",
+                                          }),
+                                          jsxRuntimeExports.jsx("button", {
+                                            type: "button",
+                                            className:
+                                              "video-button video-button-primary",
+                                            style: {
+                                              flex: 1,
+                                              whiteSpace: "nowrap",
+                                            },
+                                            onClick: handleOpenTopicAnalysis,
+                                            children: "方向分析",
+                                          }),
+                                        ],
                                       },
                                     ),
                                   ],
@@ -2005,7 +2687,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsx("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: jsxRuntimeExports.jsx("path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }) }),
-                                  "AI法务",
+                                  "合规审查",
                                 ],
                               }),
                               jsxRuntimeExports.jsxs("button", {
@@ -2014,7 +2696,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsxs("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "10" }), jsxRuntimeExports.jsx("line", { x1: "2", y1: "12", x2: "22", y2: "12" }), jsxRuntimeExports.jsx("path", { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" })] }),
-                                  "翻译文案",
+                                  "语种翻译",
                                 ],
                               }),
                             ],
@@ -2348,7 +3030,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsx("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: jsxRuntimeExports.jsx("path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }) }),
-                                  "AI法务",
+                                  "合规审查",
                                 ],
                               }),
                               jsxRuntimeExports.jsxs("button", {
@@ -2357,7 +3039,7 @@ ${note}`
                                 style: { flex: 1 },
                                 children: [
                                   jsxRuntimeExports.jsxs("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", children: [jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "10" }), jsxRuntimeExports.jsx("line", { x1: "2", y1: "12", x2: "22", y2: "12" }), jsxRuntimeExports.jsx("path", { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" })] }),
-                                  "翻译文案",
+                                  "语种翻译",
                                 ],
                               }),
                             ],
@@ -2496,7 +3178,7 @@ ${note}`
                     fontWeight: 600,
                     color: "var(--ly-text)",
                   },
-                  children: "借东风",
+                  children: "学灵感",
                 }),
               }),
               jsxRuntimeExports.jsx("div", {
@@ -2611,9 +3293,9 @@ ${note}`
                               jsxRuntimeExports.jsx("code", {
                                 style: { fontFamily: "monospace" },
                                 children:
-                                  "https://www.douyin.com/user/xxx?from_tab_name=main",
+                                  "https://www.douyin.com/user/MS4wLjABAAAA...",
                               }),
-                              "新建议直接粘贴电脑端或手机端分享名片里的主页链接。如链接地址填错，将无法正常分析该博主。",
+                              "请粘贴博主主页链接（分享主页）。若只有视频链接也可保存，系统会在选题分析时自动识别博主。单条视频请用「解析视频」。",
                             ],
                           }),
                         ],
@@ -2786,7 +3468,7 @@ ${note}`
                                                 color: "var(--ly-text)",
                                               },
                                               children:
-                                                p.name || "未命名 借东风",
+                                                p.name || "未命名 学灵感",
                                             },
                                           ),
                                           jsxRuntimeExports.jsxs(
@@ -2976,8 +3658,25 @@ ${note}`
                       className: "video-button video-button-primary",
                       style: { width: "auto", paddingInline: 14 },
                       onClick: () => {
-                        const name = ipBrainName.trim() || "未命名 借东风";
-                        const homepage = ipBrainHomepage.trim();
+                        const name = ipBrainName.trim() || "未命名 学灵感";
+                        const homepage = normalizeDouyinUrlForDownloader(
+                          ipBrainHomepage.trim(),
+                        ) || ipBrainHomepage.trim();
+                        if (!homepage) {
+                          showToast("请填写主页地址", "info");
+                          return;
+                        }
+                        const check = validateHomepageForTopicAnalysis(homepage);
+                        if (!check.ok) {
+                          showToast(check.hint || DOUYIN_HOMEPAGE_HINT, "info");
+                          return;
+                        }
+                        if (check.isVideoLink) {
+                          showToast(
+                            "已保存视频链接，选题分析时将自动识别博主主页",
+                            "info",
+                          );
+                        }
                         const now = new Date();
                         const profile = {
                           id: String(Date.now()),
@@ -3004,8 +3703,7 @@ ${note}`
         jsxRuntimeExports.jsx("div", {
           className: "video-modal-overlay",
           onClick: (e) => {
-            if (e.target === e.currentTarget && !isTopicAnalyzing)
-              setShowTopicModal(false);
+            if (e.target === e.currentTarget) handleCancelTopicAnalysis();
           },
           style: {
             position: "fixed",
@@ -3036,9 +3734,7 @@ ${note}`
             onClick: (e) => e.stopPropagation(),
             children: [
               jsxRuntimeExports.jsx("button", {
-                onClick: () => {
-                  if (!isTopicAnalyzing) setShowTopicModal(false);
-                },
+                onClick: handleCancelTopicAnalysis,
                 style: {
                   position: "absolute",
                   top: 12,
@@ -3046,7 +3742,7 @@ ${note}`
                   border: "none",
                   background: "transparent",
                   fontSize: 18,
-                  cursor: isTopicAnalyzing ? "not-allowed" : "pointer",
+                  cursor: "pointer",
                   color: "var(--ly-text-2)",
                   width: 28,
                   height: 28,
@@ -3056,9 +3752,7 @@ ${note}`
                   borderRadius: 6,
                   transition: "background-color 0.2s",
                 },
-                disabled: isTopicAnalyzing,
                 onMouseEnter: (e) => {
-                  if (isTopicAnalyzing) return;
                   e.currentTarget.style.backgroundColor =
                     "rgba(148, 163, 184, 0.16)";
                 },
@@ -3097,7 +3791,7 @@ ${note}`
                     fontWeight: 600,
                     color: "var(--ly-text)",
                   },
-                  children: "借东风选题分析",
+                  children: "学灵感选题分析",
                 }),
               }),
               isTopicAnalyzing || isTopicScriptsLoading
@@ -3123,6 +3817,17 @@ ${note}`
                         jsxRuntimeExports.jsx("div", {
                           className: "ipbrain-topic-loading-text-sub",
                           children: "这可能需要几秒钟，请稍候",
+                        }),
+                        jsxRuntimeExports.jsx("button", {
+                          type: "button",
+                          className: "video-button video-button-outline",
+                          style: {
+                            marginTop: 12,
+                            width: "auto",
+                            paddingInline: 16,
+                          },
+                          onClick: handleCancelTopicAnalysis,
+                          children: "取消",
                         }),
                       ],
                     }),
@@ -3251,7 +3956,7 @@ ${note}`
                                             setRewrittenScript(script);
                                             setShowTopicModal(false);
                                             showToast(
-                                              "已将文案写入 借东风文案区域",
+                                              "已将文案写入学灵感文案区域",
                                               "success",
                                             );
                                           },

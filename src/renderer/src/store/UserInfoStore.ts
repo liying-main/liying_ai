@@ -1,5 +1,9 @@
 import { create } from 'zustand'
 
+/**
+ * 开源版：没有账号体系，用户信息固定为本地占位。
+ * 保留原有 store 形状，业务代码无需改动。
+ */
 interface UserInfo {
   phone?: string
   nickName?: string
@@ -14,19 +18,21 @@ interface UserInfoState {
   clearUserInfo: () => void
 }
 
+const LOCAL_USER: UserInfo = {
+  nickName: '厉影AI 开源版',
+  phone: '',
+  expiryTime: '',
+}
+
 export const useUserInfoStore = create<UserInfoState>()((set) => ({
-  userInfo: {
-    nickName: '本地用户',
-    phone: '',
-    avatarUrl: undefined,
-    expiryTime: undefined
-  },
-  
+  userInfo: LOCAL_USER,
+
   loadUserInfo: async () => {
-    // No backend - use default local user
+    set({ userInfo: LOCAL_USER })
   },
-  
+
   clearUserInfo: () => {
-    set({ userInfo: null })
-  }
+    set({ userInfo: LOCAL_USER })
+  },
 }))
+

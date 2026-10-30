@@ -1,40 +1,43 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { VideoScriptCard } from './VideoScriptCard'
 import { VideoAudioCard } from './VideoAudioCard'
 import { VideoGenerateCard } from './VideoGenerateCard'
 import { VideoSubtitleCard } from './VideoSubtitleCard'
 import { VideoBgmCard } from './VideoBgmCard.simple'
 import { useVideoPageStore } from '../../store/VideoPageStore'
+import { QueuePopup } from '../../components/QueuePopup'
+import { UserAvatar } from '../../components/UserAvatar'
 import { Sidebar } from '../../components/Sidebar'
 import { SettingsPanel } from '../../components/SettingsPanel'
-import { AdProvider, useAd } from '../../components/AdContext'
+import { WorksPanel } from '../../components/WorksPanel'
+import { TaskCenterPanel } from '../../components/TaskCenterPanel'
 
-function AutoFlowAdButton() {
-  const { openAd } = useAd()
-  return (
-    <button
-      type="button"
-      className="video-button video-button-primary app-flow-oneclick"
-      onClick={() => openAd()}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-      </svg>
-      一键串联后续流程
-    </button>
-  )
-}
+interface VideoPageProps {}
 
-function VideoPageInner() {
+export function VideoPage(_props: VideoPageProps) {
   const flowMode = useVideoPageStore((s) => s.flowMode)
   const setFlowMode = useVideoPageStore((s) => s.setFlowMode)
   const runAutoFlow = useVideoPageStore((s) => s.runAutoFlow)
   const autoFlowRunning = useVideoPageStore((s) => s.autoFlowRunning)
+  const loadAllResources = useVideoPageStore((s) => s.loadAllResources)
+  const [showSettings, setShowSettings] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [activePage, setActivePage] = useState('home')
-  const { openAd } = useAd()
+  const [needsSetup, setNeedsSetup] = useState(false)
 
+  const isHomePage = activePage === 'home'
   const isSettingsPage = activePage.startsWith('settings-')
+  const isWorksPage = activePage === 'works'
+  const isTaskCenterPage = activePage === 'task-center'
+
+  // Load all resources on mount
+  useEffect(() => {
+    loadAllResources()
+  }, [loadAllResources])
+
+  useEffect(() => {
+    window.api?.getStationConfig?.().then((config) => setNeedsSetup(!config?.apiKey?.trim())).catch(() => setNeedsSetup(true))
+  }, [])
 
   const handleMinimize = () => {
     (window as any).api?.minimizeWindow?.()
@@ -72,7 +75,7 @@ function VideoPageInner() {
 
       {/* 侧边栏 + 主区域 横向布局 */}
       <div className="app-body">
-        <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} activeItem={activePage} onItemChange={setActivePage} onAdClick={openAd} />
+        <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} activeItem={activePage} onItemChange={setActivePage} />
 
         <div className="app-main">
           {/* 主头部导航 */}
@@ -99,7 +102,7 @@ function VideoPageInner() {
                     className={`script-mode-tab app-flow-tab ${flowMode === 'manual' ? 'active' : ''}`}
                     onClick={() => setFlowMode('manual')}
                   >
-                    分步处理
+                    手动
                   </button>
                   <button
                     type="button"
@@ -108,23 +111,45 @@ function VideoPageInner() {
                     className={`script-mode-tab app-flow-tab ${flowMode === 'auto' ? 'active' : ''}`}
                     onClick={() => setFlowMode('auto')}
                   >
-                    智能串联
+                    自动
                   </button>
                 </div>
-                {flowMode === 'auto' && <AutoFlowAdButton />}
+                {flowMode === 'auto' && (
+                  <button
+                    type="button"
+                    className="video-button video-button-primary app-flow-oneclick"
+                    disabled={!runAutoFlow || autoFlowRunning}
+                    onClick={() => runAutoFlow?.()}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                    </svg>
+                    一键自动后续流程
+                  </button>
+                )}
               </div>
 
-              {/* 右侧 */}
+              {/* 右侧 - AI队列、用户头像 */}
               <div className="app-main-header-right">
+                <QueuePopup />
+                <UserAvatar showSettings={showSettings} setShowSettings={setShowSettings} />
               </div>
             </div>
           </div>
 
-          {/* 视频页面内容 或 设置页面 */}
-          {isSettingsPage ? (
-            <SettingsPanel activeTab={activePage as any} />
-          ) : (
-            <div className="video-page">
+          {/* 工作台始终挂载（隐藏而非卸载），避免切换页面时丢失生成进度 */}
+          <div className="app-main-content">
+            {isHomePage && needsSetup && (
+              <div role="status" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', borderBottom: '1px solid var(--ly-border)', fontSize: '12px', color: 'var(--ly-text-2)' }}>
+                <span style={{ flex: 1 }}>欢迎使用厉影AI 数字人。先体验工作台；使用云端生成时，请在设置中配置 API Key。</span>
+                <button className="video-button video-button-primary" onClick={() => setActivePage('settings-api')}>配置服务</button>
+                <button className="video-button" onClick={() => setNeedsSetup(false)}>稍后再说</button>
+              </div>
+            )}
+            <div
+              className={`video-page${isHomePage ? '' : ' video-page--hidden'}`}
+              aria-hidden={!isHomePage}
+            >
               <div className="video-page-container">
                 <div className="video-page-grid-slot video-page-grid-slot--1">
                   <VideoScriptCard />
@@ -147,17 +172,24 @@ function VideoPageInner() {
                 </div>
               </div>
             </div>
-          )}
+            {isSettingsPage && (
+              <SettingsPanel activeTab={activePage as any} onConfigured={() => setNeedsSetup(false)} />
+            )}
+            {isWorksPage && (
+              <WorksPanel
+                onNavigateHome={() => setActivePage('home')}
+                onNavigateTaskCenter={() => setActivePage('task-center')}
+              />
+            )}
+            {isTaskCenterPage && (
+              <TaskCenterPanel
+                onNavigateHome={() => setActivePage('home')}
+                onNavigateWorks={() => setActivePage('works')}
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>
-  )
-}
-
-export function VideoPage() {
-  return (
-    <AdProvider>
-      <VideoPageInner />
-    </AdProvider>
   )
 }

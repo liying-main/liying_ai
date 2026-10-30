@@ -1,0 +1,13 @@
+{
+  "voices": [
+    { "id": "voice1", "name": "青春女", "promptText": "" },
+    { "id": "voice2", "name": "磁性男", "promptText": "" },
+    { "id": "voice3", "name": "甜美女", "promptText": "" },
+    { "id": "voice4", "name": "干净男", "promptText": "" },
+    { "id": "voice5", "name": "口播女", "promptText": "" },
+    { "id": "voice6", "name": "播音男", "promptText": "" },
+    { "id": "小朋友", "name": "小朋友", "promptText": "" },
+    { "id": "温柔女", "name": "温柔女", "promptText": "" },
+    { "id": "老者", "name": "老者", "promptText": "" }
+  ]
+}

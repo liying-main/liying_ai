@@ -221,16 +221,24 @@ export function QueuePopup() {
                             className: "queue-popup-waiting",
                             children: jsxRuntimeExports.jsxs("div", {
                               className: "queue-popup-position",
-                              children: [
+                              children: state.position <= 0
+                                ? [
+                                    jsxRuntimeExports.jsx("span", {
+                                      className: "queue-popup-pos-num",
+                                      style: { fontSize: "20px" },
+                                      children: "即将开始",
+                                    }),
+                                  ]
+                                : [
                                 jsxRuntimeExports.jsx("span", {
                                   className: "queue-popup-pos-num",
                                   children: state.position,
                                 }),
                                 jsxRuntimeExports.jsx("span", {
                                   className: "queue-popup-pos-label",
-                                  children: "等待位置",
+                                  children: "前面等待",
                                 }),
-                              ],
+                                  ],
                             }),
                           }),
                         ],

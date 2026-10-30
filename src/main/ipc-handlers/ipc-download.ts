@@ -1,18 +1,24 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
 import { spawn, exec } from 'child_process'
+import { createHash } from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import https from 'https'
 import http from 'http'
+import iconv from 'iconv-lite'
 import { getUserDataPath } from '../local-server'
 import { API_BASE_URL } from '../api-config'
 import { needTokenFromMain } from './ipc-plugin-proxy'
-
-function getFfmpegPath(): string {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'ffmpeg', 'bin', 'ffmpeg.exe')
-    : path.join(process.cwd(), 'ffmpeg', 'bin', 'ffmpeg.exe')
-}
+import { getFfmpegPath, getDouyinExePath, resolveDouyinExePath, DOUYIN_DOWNLOADER_MISSING_MESSAGE } from '../platform-paths'
+import { downloadDouyinVideoWithBrowser } from '../douyin-browser-downloader'
+import {
+  extractUrlFromText,
+  isDouyinProfileUrl,
+  buildDouyinProfileUrl,
+  extractSecUidFromInfoResult,
+  formatDouyinUserPostsError,
+  normalizeDouyinUrlForDownloader,
+} from '../douyin-url-helpers'
 
 // API Configuration
 const NONCE_INFO_KEY = 'douyin_cookies_info'
@@ -22,7 +28,7 @@ let cachedToken: string | null = null
 
 declare const __APP_VERSION__: string
 function getClientApiVersion(): string {
-  return typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.0.1'
+  return typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.2.4'
 }
 
 function appVersionHeaders(): Record<string, string> {
@@ -36,12 +42,6 @@ async function cacheToken(): Promise<string | null> {
 
 export function setDownloadToken(token: string): void {
   cachedToken = token
-}
-
-function getDouyinExePath(): string {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'douyin', 'downloadDouyinVideo.exe')
-    : path.join(process.cwd(), 'douyin', 'downloadDouyinVideo.exe')
 }
 
 function getDouyinPackagedExeCwd(): string {
@@ -89,10 +89,415 @@ function parseJsonFromStdout(stdout: string): any {
   return null
 }
 
+function collectSpawnOutput(stream: NodeJS.ReadableStream | null, chunks: Buffer[]): void {
+  stream?.on('data', (chunk: Buffer | string) => {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk)
+  })
+}
+
+function decodeSpawnOutput(chunks: Buffer[]): string {
+  if (chunks.length === 0) return ''
+  const buffer = Buffer.concat(chunks)
+  if (process.platform !== 'win32') {
+    return buffer.toString('utf8')
+  }
+  const utf8Text = buffer.toString('utf8')
+  const gbkText = iconv.decode(buffer, 'gbk')
+  if (parseJsonFromStdout(utf8Text)) return utf8Text
+  if (parseJsonFromStdout(gbkText)) return gbkText
+  // The downloader emits UTF-8 even on Windows. Prefer the candidate that
+  // preserves Chinese text instead of treating valid UTF-8 as GBK mojibake.
+  const cjkScore = (value: string) => (value.match(/[\u3400-\u9fff]/g) || []).length
+  if (cjkScore(utf8Text) > cjkScore(gbkText)) return utf8Text
+  if (cjkScore(gbkText) > cjkScore(utf8Text)) return gbkText
+  if (!utf8Text.includes('\uFFFD')) return utf8Text
+  return gbkText
+}
+
+function resolveDownloadedFilePath(
+  rawPath: string | undefined,
+  downloadDir: string,
+  expectedFileName?: string
+): string | undefined {
+  const candidates: string[] = []
+  const addCandidate = (candidate?: string) => {
+    if (!candidate) return
+    const normalized = path.resolve(candidate)
+    if (!candidates.includes(normalized)) {
+      candidates.push(normalized)
+    }
+  }
+
+  if (rawPath) {
+    addCandidate(rawPath)
+    const fileName = path.basename(rawPath.replace(/\\/g, '/'))
+    if (fileName && fileName !== '.' && fileName !== '..') {
+      addCandidate(path.join(downloadDir, fileName))
+    }
+  }
+  if (expectedFileName) {
+    addCandidate(path.join(downloadDir, expectedFileName))
+  }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate
+    }
+  }
+
+  if (expectedFileName?.toLowerCase().endsWith('.mp4')) {
+    try {
+      const recentMp4 = fs.readdirSync(downloadDir)
+        .filter((name) => name.toLowerCase().endsWith('.mp4'))
+        .map((name) => {
+          const filePath = path.join(downloadDir, name)
+          return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs }
+        })
+        .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
+
+      if (recentMp4 && Date.now() - recentMp4.mtimeMs < 5 * 60 * 1000) {
+        return recentMp4.filePath
+      }
+    } catch (error) {
+      console.warn('[download] failed to scan download dir:', error)
+    }
+  }
+
+  return rawPath
+}
+
+function getDouyinSpawnEnv(kind: 'video' | 'posts' = 'video'): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    // Keep downloader diagnostics readable on Windows for both video and user modes.
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+  }
+}
+
+function summarizeDouyinDownloadError(text: string): string {
+  const compact = String(text || '').replace(/\s+/g, ' ').trim()
+  const status = compact.match(/HTTP\s*[^\d\r\n]{0,32}(\d{3})/i)
+  if (status) {
+    return `抖音接口返回 HTTP ${status[1]}，请重新复制链接或稍后重试`
+  }
+  if (/cookie file is empty/i.test(compact)) {
+    return '抖音下载需要有效 Cookie，请先在客户端打开抖音并重试'
+  }
+  return compact.slice(-360) || '抖音下载器未返回具体错误'
+}
+
+function shouldUseDouyinBrowserFallback(run: {
+  code: number | null
+  stdout: string
+  stderr: string
+  result: any | null
+}): boolean {
+  const text = [run.stdout, run.stderr, run.result?.message, run.result?.error]
+    .filter(Boolean)
+    .join(' ')
+  return /(?:HTTP\s*[^\d\r\n]{0,32})?403\b|forbidden|failed to get cookies|无法启动浏览器|(?:chrome|edge).*驱动.*(?:不存在|缺失)/i.test(text)
+}
+
+function stripUnsupportedText(text: unknown): string {
+  if (typeof text !== 'string') return ''
+  return text
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '')
+    .replace(/\uFEFF/g, '')
+    .trim()
+}
+
+function sanitizeDouyinPosts(posts: any[]): any[] {
+  if (!Array.isArray(posts)) return []
+  return posts.map((post) => {
+    if (!post || typeof post !== 'object') return post
+    const desc = stripUnsupportedText(
+      post.desc || post.description || post.title || post.text || post.caption || post.content || ''
+    )
+    return {
+      ...post,
+      desc,
+      title: stripUnsupportedText(post.title || desc),
+      description: stripUnsupportedText(post.description || desc),
+    }
+  })
+}
+
+function getUserPostsDownloadDir(profileUrl: string): string {
+  const dirKey = createHash('sha256').update(profileUrl.trim().toLowerCase()).digest('hex').slice(0, 16)
+  return getUserDataPath(`temp/user_posts/${dirKey}`)
+}
+
+function loadPostsFromJsonFile(filePath: string): any[] | null {
+  try {
+    if (!fs.existsSync(filePath)) return null
+    const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+    const posts = Array.isArray(fileData)
+      ? fileData
+      : (fileData.posts || fileData.aweme_list || null)
+    if (!Array.isArray(posts) || posts.length === 0) return null
+    return sanitizeDouyinPosts(posts)
+  } catch (error) {
+    console.warn('[download-douyin] failed to read posts file:', filePath, error)
+    return null
+  }
+}
+
+function loadRecentPostsFromDownloadDir(downloadDir: string): any[] | null {
+  try {
+    if (!fs.existsSync(downloadDir)) return null
+    const jsonFiles = fs.readdirSync(downloadDir)
+      .filter((name) => name.toLowerCase().endsWith('.json'))
+      .map((name) => ({
+        filePath: path.join(downloadDir, name),
+        mtimeMs: fs.statSync(path.join(downloadDir, name)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+
+    for (const file of jsonFiles) {
+      if (Date.now() - file.mtimeMs > 5 * 60 * 1000) continue
+      const posts = loadPostsFromJsonFile(file.filePath)
+      if (posts) return posts
+    }
+  } catch (error) {
+    console.warn('[download-douyin] failed to scan posts dir:', error)
+  }
+  return null
+}
+
+function resolveDouyinUserPostsResult(
+  finalResult: any,
+  stdout: string,
+  stderr: string,
+  downloadDir: string,
+  inputUrl?: string
+): { success: boolean; posts?: any[]; message?: string; error?: string } {
+  if (finalResult?.status === 'success' && Array.isArray(finalResult.posts)) {
+    return { success: true, posts: sanitizeDouyinPosts(finalResult.posts) }
+  }
+
+  if (finalResult?.status === 'success' && finalResult.file_path) {
+    const postsFilePath = resolveDownloadedFilePath(finalResult.file_path, downloadDir)
+    const posts = postsFilePath ? loadPostsFromJsonFile(postsFilePath) : null
+    if (posts) return { success: true, posts }
+  }
+
+  const fallbackPosts = loadRecentPostsFromDownloadDir(downloadDir)
+  if (fallbackPosts) {
+    console.warn('[download-douyin] recovered posts from download dir after stdout failure')
+    return { success: true, posts: fallbackPosts }
+  }
+
+  if (finalResult?.status === 'error') {
+    const rawMessage = finalResult.message || '获取用户作品失败'
+    return {
+      success: false,
+      message: inputUrl ? formatDouyinUserPostsError(rawMessage, inputUrl) : rawMessage,
+      error: stderr || stdout,
+    }
+  }
+
+  return {
+    success: false,
+    message: inputUrl
+      ? formatDouyinUserPostsError('无法解析结果', inputUrl)
+      : '无法解析结果',
+    error: stderr || stdout,
+  }
+}
+
+async function ensureDouyinCookiesFile(cookiesPath: string): Promise<void> {
+  let token: string | null = null
+  try {
+    token = await needTokenFromMain()
+  } catch {
+    token = await cacheToken()
+  }
+  if (!token) return
+
+  try {
+    const url = `${API_BASE_URL}/app/base/comm/param?key=${encodeURIComponent(NONCE_INFO_KEY)}`
+    const res = await fetch(url, {
+      headers: { ...appVersionHeaders(), Authorization: token },
+    })
+    const json = (await res.json()) as { data?: unknown; code?: number; message?: string }
+    const data = json?.data
+    if (data != null) {
+      fs.writeFileSync(cookiesPath, typeof data === 'string' ? data : JSON.stringify(data))
+    }
+  } catch (e) {
+    console.warn('[download-douyin] Failed to fetch cookies:', e)
+  }
+}
+
+function runDouyinDownloader(
+  exePath: string,
+  spawnArgs: string[],
+  kind: 'video' | 'posts',
+  timeoutMs = 180000
+): Promise<{ code: number | null; stdout: string; stderr: string; result: any | null }> {
+  return new Promise((resolve, reject) => {
+    const cwd = getDouyinPackagedExeCwd()
+    if (!fs.existsSync(cwd)) {
+      fs.mkdirSync(cwd, { recursive: true })
+    }
+
+    const child = spawn(exePath, spawnArgs, {
+      cwd,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: getDouyinSpawnEnv(kind === 'posts' ? 'posts' : 'video'),
+    })
+
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try {
+        child.kill('SIGKILL')
+      } catch {}
+      reject(new Error('抖音下载器执行超时'))
+    }, timeoutMs)
+
+    collectSpawnOutput(child.stdout, stdoutChunks)
+    collectSpawnOutput(child.stderr, stderrChunks)
+
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const stdout = decodeSpawnOutput(stdoutChunks)
+      const stderr = decodeSpawnOutput(stderrChunks)
+      resolve({
+        code,
+        stdout,
+        stderr,
+        result: parseJsonFromStdout(stdout),
+      })
+    })
+
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(err)
+    })
+  })
+}
+
+function isDouyinShareShortUrl(inputUrl: string): boolean {
+  try {
+    const parsed = new URL(inputUrl)
+    const host = parsed.hostname.toLowerCase()
+    return (
+      host === 'v.douyin.com' ||
+      host.endsWith('.v.douyin.com') ||
+      host === 'iesdouyin.com' ||
+      host.endsWith('.iesdouyin.com')
+    )
+  } catch {
+    return /v\.douyin\.com|iesdouyin\.com/i.test(inputUrl)
+  }
+}
+
+async function resolveDouyinShareRedirectUrl(inputUrl: string): Promise<string | null> {
+  if (!isDouyinShareShortUrl(inputUrl)) return null
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  }
+
+  for (const method of ['HEAD', 'GET'] as const) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 12000)
+    try {
+      const response = await fetch(inputUrl, {
+        method,
+        redirect: 'follow',
+        headers,
+        signal: controller.signal,
+      })
+      const finalUrl = response.url ? normalizeDouyinUrlForDownloader(response.url) : ''
+      if (finalUrl && finalUrl !== inputUrl) return finalUrl
+    } catch (error) {
+      console.warn(`[download-douyin] failed to resolve share redirect with ${method}:`, error)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return null
+}
+
+async function resolveDouyinProfileUrl(
+  inputUrl: string,
+  exePath: string,
+  cookiesPath: string,
+  workDir: string
+): Promise<
+  | { ok: true; profileUrl: string; resolvedFrom: 'direct' | 'share' | 'video' }
+  | { ok: false; message: string }
+> {
+  let url = normalizeDouyinUrlForDownloader(inputUrl)
+  if (!url) {
+    return { ok: false, message: '主页链接不能为空' }
+  }
+
+  const redirectedUrl = await resolveDouyinShareRedirectUrl(url)
+  if (redirectedUrl) {
+    console.log('[download-douyin] resolved share redirect:', redirectedUrl)
+    url = redirectedUrl
+  }
+
+  if (isDouyinProfileUrl(url)) {
+    return { ok: true, profileUrl: url, resolvedFrom: redirectedUrl ? 'share' : 'direct' }
+  }
+
+  const infoDir = path.join(workDir, '_profile_resolve')
+  if (!fs.existsSync(infoDir)) {
+    fs.mkdirSync(infoDir, { recursive: true })
+  }
+
+  console.log('[download-douyin] resolving profile from video/short link:', url)
+  const infoArgs = [url, '-c', cookiesPath, '-d', infoDir, '-m', 'info']
+  try {
+    const infoRun = await runDouyinDownloader(exePath, infoArgs, 'posts', 120000)
+    if (infoRun.result?.status === 'success') {
+      const secUid = extractSecUidFromInfoResult(infoRun.result)
+      if (secUid) {
+        const profileUrl = buildDouyinProfileUrl(secUid)
+        console.log('[download-douyin] resolved profile url:', profileUrl)
+        return { ok: true, profileUrl, resolvedFrom: 'video' }
+      }
+    }
+    const rawMessage =
+      infoRun.result?.message || infoRun.stderr || infoRun.stdout || '无法从链接识别博主主页'
+    return { ok: false, message: formatDouyinUserPostsError(rawMessage, url) }
+  } catch (error: any) {
+    const rawMessage = error instanceof Error ? error.message : String(error)
+    return { ok: false, message: formatDouyinUserPostsError(rawMessage, url) }
+  }
+}
+
 export function registerDownloadHandlers(): void {
-  ipcMain.handle('download-video-from-url', async (_, videoUrl: string, fileName: string) => {
+  // 特性检测：抖音下载器在当前平台是否可用 (Mac arm64/x64 需要二进制存在)
+  // 前端可据此隐藏抖音下载入口，避免点了报错
+  ipcMain.handle('douyin-downloader-available', async () => {
+    const { exePath } = resolveDouyinExePath()
+    return {
+      available: Boolean(exePath),
+      platform: process.platform,
+      arch: process.arch,
+      expectedPath: exePath || getDouyinExePath()
+    }
+  })
+
+  ipcMain.handle('download-video-from-url', async (event, videoUrl: string, fileName: string) => {
     console.log('[download-video] Starting download:', { videoUrl, fileName })
-    
+
     let token: string | null = null
     try {
       token = await needTokenFromMain()
@@ -100,46 +505,107 @@ export function registerDownloadHandlers(): void {
       token = await cacheToken()
     }
     console.log('[download-video] Using token:', token ? 'present' : 'empty')
-    
-    return new Promise((resolve) => {
-      const outputDir = getUserDataPath('videos/generated')
-      if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true })
-      const outputPath = path.join(outputDir, fileName)
-      const file = fs.createWriteStream(outputPath)
-      const protocol = videoUrl.startsWith('https') ? https : http
-      
-      const request = protocol.get(videoUrl, {
-        headers: { 'Authorization': token || '' }
-      }, (response) => {
-        console.log('[download-video] Response status:', response.statusCode)
-        if (response.statusCode !== 200) {
+
+    const outputDir = getUserDataPath('videos/generated')
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true })
+    const outputPath = path.join(outputDir, fileName)
+
+    const sender = event.sender
+    const emitProgress = (data: {
+      phase: 'start' | 'progress' | 'done' | 'retry' | 'error'
+      loaded?: number
+      total?: number
+      percent?: number
+      speedBps?: number
+      attempt?: number
+      error?: string
+    }) => {
+      try {
+        if (sender && !sender.isDestroyed()) {
+          sender.send('video-download-progress', data)
+        }
+      } catch {}
+    }
+
+    const attemptDownload = (attempt: number): Promise<{ success: boolean; file_path?: string; error?: string }> =>
+      new Promise((resolve) => {
+        const file = fs.createWriteStream(outputPath)
+        const protocol = videoUrl.startsWith('https') ? https : http
+
+        let loaded = 0
+        let total = 0
+        let lastEmitTs = 0
+        let lastEmitLoaded = 0
+        const startTs = Date.now()
+        emitProgress({ phase: 'start', attempt })
+
+        const request = protocol.get(videoUrl, {
+          headers: { 'Authorization': token || '' }
+        }, (response) => {
+          console.log('[download-video] Response status:', response.statusCode, 'attempt:', attempt)
+          if (response.statusCode !== 200) {
+            file.close()
+            try { fs.unlinkSync(outputPath) } catch {}
+            resolve({ success: false, error: `HTTP ${response.statusCode}` })
+            return
+          }
+
+          const contentLength = parseInt(response.headers['content-length'] || '0', 10)
+          if (contentLength > 0) total = contentLength
+
+          response.on('data', (chunk: Buffer) => {
+            loaded += chunk.length
+            const now = Date.now()
+            // Throttle progress events to ~5/s
+            if (now - lastEmitTs >= 200 || (total > 0 && loaded >= total)) {
+              const elapsedMs = now - (lastEmitTs || startTs)
+              const bytesDelta = loaded - lastEmitLoaded
+              const speedBps = elapsedMs > 0 ? Math.round((bytesDelta * 1000) / elapsedMs) : 0
+              const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+              emitProgress({ phase: 'progress', loaded, total, percent, speedBps, attempt })
+              lastEmitTs = now
+              lastEmitLoaded = loaded
+            }
+          })
+
+          response.pipe(file)
+          file.on('finish', () => {
+            file.close()
+            console.log('[download-video] Downloaded to:', outputPath, 'bytes:', loaded)
+            emitProgress({ phase: 'done', loaded, total: total || loaded, percent: 100, attempt })
+            resolve({ success: true, file_path: outputPath })
+          })
+        })
+
+        request.on('error', (err) => {
+          console.log('[download-video] Request error:', err.message, 'attempt:', attempt)
           file.close()
           try { fs.unlinkSync(outputPath) } catch {}
-          resolve({ success: false, error: `HTTP ${response.statusCode}` })
-          return
-        }
-        response.pipe(file)
-        file.on('finish', () => {
-          file.close()
-          console.log('[download-video] Downloaded to:', outputPath)
-          resolve({ success: true, file_path: outputPath })
+          resolve({ success: false, error: err.message })
+        })
+
+        file.on('error', (err) => {
+          console.log('[download-video] File write error:', err.message, 'attempt:', attempt)
+          request.destroy()
+          try { fs.unlinkSync(outputPath) } catch {}
+          resolve({ success: false, error: err.message })
         })
       })
-      
-      request.on('error', (err) => {
-        console.log('[download-video] Request error:', err.message)
-        file.close()
-        try { fs.unlinkSync(outputPath) } catch {}
-        resolve({ success: false, error: err.message })
-      })
-      
-      file.on('error', (err) => {
-        console.log('[download-video] File write error:', err.message)
-        request.destroy()
-        try { fs.unlinkSync(outputPath) } catch {}
-        resolve({ success: false, error: err.message })
-      })
-    })
+
+    const MAX_ATTEMPTS = 2
+    let lastError: string | undefined
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const result = await attemptDownload(attempt)
+      if (result.success) return result
+      lastError = result.error
+      if (attempt < MAX_ATTEMPTS) {
+        console.log('[download-video] Retrying after failure:', result.error)
+        emitProgress({ phase: 'retry', attempt, error: result.error })
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+    }
+    emitProgress({ phase: 'error', error: lastError })
+    return { success: false, error: lastError }
   })
 
   ipcMain.handle('download-audio-from-url', async (event, audioUrl: string, options?: any) => {
@@ -264,16 +730,14 @@ export function registerDownloadHandlers(): void {
         const cmd2 = `"${ffmpegPath}" -f lavfi -t ${silenceSeconds} -i anullsrc=r=44100:cl=stereo -i "${currentWavPath}" -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1[out]" -map "[out]" -acodec pcm_s16le -ar 44100 -ac 2 -y "${finalWavPath.replace(/\\/g, '/')}"`
         await execFfmpeg(cmd2)
         try {
-          const p = currentWavPath.replace(/\//g, '\\')
-          if (fs.existsSync(p)) fs.unlinkSync(p)
+          if (fs.existsSync(currentWavPath)) fs.unlinkSync(currentWavPath)
         } catch {}
       } else {
         try {
-          fs.renameSync(currentWavPath.replace(/\//g, '\\'), finalWavPath)
+          fs.renameSync(currentWavPath, finalWavPath)
         } catch (e) {
           try {
-            const p = currentWavPath.replace(/\//g, '\\')
-            if (fs.existsSync(p)) fs.unlinkSync(p)
+            if (fs.existsSync(currentWavPath)) fs.unlinkSync(currentWavPath)
           } catch {}
           return { success: false, error: `保存文件失败: ${e instanceof Error ? e.message : String(e)}` }
         }
@@ -292,345 +756,227 @@ export function registerDownloadHandlers(): void {
     }
   })
 
-  ipcMain.handle('download-douyin-video', async (event, videoUrl: string, options?: any) => {
-    return new Promise(async (resolve) => {
-      try {
-        const exePath = getDouyinExePath()
-        if (!fs.existsSync(exePath)) {
-          resolve({
-            success: false,
-            message: 'Download program not found',
-            error: `File not found: ${exePath}`
-          })
-          return
-        }
-        
-        const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
-        const downloadDir = options?.downloadDir?.trim() || getUserDataPath('videos/downloaded')
-        
-        // Get token and fetch cookies
-        let token: string | null = null
-        try {
-          token = await needTokenFromMain()
-        } catch {
-          token = await cacheToken()
-        }
-
-        if (token) {
-          try {
-            const url = `${API_BASE_URL}/app/base/comm/param?key=${encodeURIComponent(NONCE_INFO_KEY)}`
-            console.log('[download-douyin] Fetching cookies from:', url)
-            const res = await fetch(url, {
-              headers: { ...appVersionHeaders(), Authorization: token }
-            })
-            const json = await res.json() as { data?: any, code?: number, message?: string }
-            console.log('[download-douyin] Cookie fetch response:', json)
-            const data = json?.data
-            if (data != null) {
-              fs.writeFileSync(cookiesPath, typeof data === 'string' ? data : JSON.stringify(data))
-              console.log('[download-douyin] Cookies written to:', cookiesPath)
-            } else {
-              console.warn('[download-douyin] No cookie data found in response')
-            }
-          } catch (e) {
-            console.warn('[download-douyin] Failed to fetch cookies:', e)
-          }
-        }
-        
-        if (!fs.existsSync(downloadDir)) {
-          fs.mkdirSync(downloadDir, { recursive: true })
-        }
-        
-        const spawnArgs = [videoUrl, '-c', cookiesPath, '-d', downloadDir]
-        console.log('Executing download command:', exePath, ...spawnArgs)
-        
-        const cwd = getDouyinPackagedExeCwd()
-        if (!fs.existsSync(cwd)) {
-          fs.mkdirSync(cwd, { recursive: true })
-        }
-        
-        const child = spawn(exePath, spawnArgs, {
-          cwd,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
-        
-        let stdout = ''
-        let stderr = ''
-        let resolved = false
-        
-        const safeResolve = (result: any) => {
-          if (!resolved) {
-            resolved = true
-            resolve(result)
-          }
-        }
-        
-        child.stdout?.on('data', (chunk) => {
-          stdout += String(chunk)
-        })
-        
-        child.stderr?.on('data', (chunk) => {
-          stderr += String(chunk)
-        })
-        
-        child.on('close', (code) => {
-          console.log('Download process finished')
-          console.log('stdout:', stdout)
-          console.log('stderr:', stderr)
-          
-          const finalResult = parseJsonFromStdout(stdout)
-          
-          if (code !== 0 && code !== null && !finalResult) {
-            safeResolve({
-              success: false,
-              message: 'Download failed',
-              error: stderr || stdout,
-              code
-            })
-            return
-          }
-          
-          if (finalResult) {
-            if (finalResult.status === 'success') {
-              let absolutePath = finalResult.file_path
-              
-              // Handle relative paths
-              const isAbsolutePath = absolutePath && (
-                /^[A-Za-z]:[\\/]/.test(absolutePath) ||
-                absolutePath.startsWith('/') ||
-                absolutePath.startsWith('\\')
-              )
-              
-              if (absolutePath && !isAbsolutePath) {
-                if (absolutePath.startsWith('.')) {
-                  absolutePath = path.join(downloadDir, absolutePath.replace(/^\./, '').replace(/\\/g, '/'))
-                } else {
-                  absolutePath = path.join(downloadDir, absolutePath.replace(/\\/g, '/'))
-                }
-              }
-              
-              // Copy to user data if needed
-              if (absolutePath && fs.existsSync(absolutePath)) {
-                const userDataVideosDir = getUserDataPath('videos/downloaded')
-                const fileName = absolutePath.split(/[/\\]/).pop() || `video_${Date.now()}.mp4`
-                const targetPath = path.join(userDataVideosDir, fileName)
-                
-                if (absolutePath !== targetPath && !fs.existsSync(targetPath)) {
-                  try {
-                    fs.copyFileSync(absolutePath, targetPath)
-                    absolutePath = targetPath
-                  } catch (copyError) {
-                    console.error('copy video to user data dir failed:', copyError)
-                  }
-                } else if (fs.existsSync(targetPath)) {
-                  absolutePath = targetPath
-                }
-              }
-              
-              safeResolve({
-                success: true,
-                message: finalResult.message,
-                file_path: absolutePath,
-                video_id: finalResult.video_id,
-                platform: finalResult.platform,
-                with_watermark: finalResult.with_watermark
-              })
-            } else {
-              safeResolve({
-                success: false,
-                message: finalResult.message || 'Download failed',
-                error: stderr || stdout
-              })
-            }
-          } else {
-            safeResolve({
-              success: false,
-              message: '无法解析下载结果，请检查程序输出',
-              error: stdout || stderr
-            })
-          }
-        })
-        
-        child.on('error', (err) => {
-          console.error('Download spawn error:', err)
-          safeResolve({
-            success: false,
-            message: '启动下载程序失败',
-            error: err.message
-          })
-        })
-      } catch (error: any) {
-        console.error('Download video failed:', error)
-        resolve({
+  ipcMain.handle('download-douyin-video', async (_event, videoUrl: string, options?: any) => {
+    try {
+      const { exePath, searched } = resolveDouyinExePath()
+      if (!exePath) {
+        return {
           success: false,
-          message: 'Download video failed',
-          error: error instanceof Error ? error.message : String(error)
-        })
+          message: DOUYIN_DOWNLOADER_MISSING_MESSAGE,
+          error: `File not found. Searched: ${searched.join('; ')}`
+        }
       }
-    })
+
+      const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
+      const downloadDir = options?.downloadDir?.trim() || getUserDataPath('videos/downloaded')
+      await ensureDouyinCookiesFile(cookiesPath)
+
+      let url = normalizeDouyinUrlForDownloader(videoUrl)
+      if (!url) {
+        return { success: false, message: '请粘贴有效的抖音视频链接', error: 'empty url' }
+      }
+      const redirectedUrl = await resolveDouyinShareRedirectUrl(url)
+      if (redirectedUrl) {
+        console.log('[download-douyin] resolved share redirect:', redirectedUrl)
+        url = redirectedUrl
+      }
+
+      if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true })
+      }
+
+      const spawnArgs = [url, '-c', cookiesPath, '-d', downloadDir]
+      console.log('Executing download command:', exePath, ...spawnArgs)
+
+      const run = await runDouyinDownloader(exePath, spawnArgs, 'video', 120000)
+      const stdout = run.stdout
+      const stderr = run.stderr
+      const finalResult = run.result
+      console.log('Download process finished:', {
+        code: run.code,
+        status: finalResult?.status || 'unparsed',
+      })
+
+      if (shouldUseDouyinBrowserFallback(run)) {
+        console.warn('[download-douyin] legacy downloader returned 403; using browser fallback')
+        try {
+          const fallback = await downloadDouyinVideoWithBrowser(url, downloadDir)
+          return {
+            success: true,
+            message: '视频下载成功',
+            file_path: fallback.filePath,
+            video_id: fallback.videoId,
+            platform: 'douyin',
+            with_watermark: false,
+            browser_fallback: true,
+            size: fallback.size,
+            duration: fallback.duration,
+          }
+        } catch (fallbackError) {
+          const fallbackMessage = fallbackError instanceof Error
+            ? fallbackError.message
+            : String(fallbackError)
+          console.error('[download-douyin] browser fallback failed:', fallbackMessage)
+          return {
+            success: false,
+            message: `抖音接口返回 HTTP 403，浏览器下载失败：${fallbackMessage}`,
+            error: fallbackMessage,
+            code: run.code,
+          }
+        }
+      }
+
+      if (run.code !== 0 && run.code !== null && !finalResult) {
+        return {
+          success: false,
+          message: summarizeDouyinDownloadError(stderr || stdout),
+          error: summarizeDouyinDownloadError(stderr || stdout),
+          code: run.code
+        }
+      }
+
+      if (!finalResult) {
+        return {
+          success: false,
+          message: '无法解析下载结果，请检查程序输出',
+          error: summarizeDouyinDownloadError(stdout || stderr)
+        }
+      }
+
+      if (finalResult.status !== 'success') {
+        return {
+          success: false,
+          message: finalResult.message || summarizeDouyinDownloadError(stderr || stdout),
+          error: summarizeDouyinDownloadError(stderr || stdout)
+        }
+      }
+
+      let absolutePath = finalResult.file_path
+      const isAbsolutePath = absolutePath && (
+        /^[A-Za-z]:[\\/]/.test(absolutePath) ||
+        absolutePath.startsWith('/') ||
+        absolutePath.startsWith('\\')
+      )
+      if (absolutePath && !isAbsolutePath) {
+        if (absolutePath.startsWith('.')) {
+          absolutePath = path.join(downloadDir, absolutePath.replace(/^\./, '').replace(/\\/g, '/'))
+        } else {
+          absolutePath = path.join(downloadDir, absolutePath.replace(/\\/g, '/'))
+        }
+      }
+
+      absolutePath = resolveDownloadedFilePath(
+        absolutePath,
+        downloadDir,
+        finalResult.video_id ? `douyin_${finalResult.video_id}.mp4` : undefined
+      )
+
+      if (!absolutePath || !fs.existsSync(absolutePath)) {
+        return {
+          success: false,
+          message: '视频已下载但无法定位文件，请重试',
+          error: summarizeDouyinDownloadError(stderr || stdout)
+        }
+      }
+
+      return {
+        success: true,
+        message: finalResult.message,
+        file_path: absolutePath,
+        video_id: finalResult.video_id,
+        platform: finalResult.platform,
+        with_watermark: finalResult.with_watermark
+      }
+    } catch (error: any) {
+      console.error('Download video failed:', error)
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Download video failed',
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
   })
 
   ipcMain.handle('download-douyin-user-posts', async (event, profileUrl: string, options?: any) => {
-    return new Promise(async (resolve) => {
-      try {
-        const exePath = getDouyinExePath()
-        if (!fs.existsSync(exePath)) {
-          resolve({
-            success: false,
-            message: 'Download program not found',
-            error: `File not found: ${exePath}`,
-            posts: []
-          })
-          return
-        }
-        
-        const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
-        const downloadDir = options?.downloadDir?.trim() || getUserDataPath('temp/user_posts')
-        
-        // Get token and fetch cookies
-        let token: string | null = null
-        try {
-          token = await needTokenFromMain()
-        } catch {
-          token = await cacheToken()
-        }
-
-        if (token) {
-          try {
-            const url = `${API_BASE_URL}/app/base/comm/param?key=${encodeURIComponent(NONCE_INFO_KEY)}`
-            console.log('[download-douyin] Fetching cookies from:', url)
-            const res = await fetch(url, {
-              headers: { ...appVersionHeaders(), Authorization: token }
-            })
-            const json = await res.json() as { data?: any, code?: number, message?: string }
-            console.log('[download-douyin] Cookie fetch response:', json)
-            const data = json?.data
-            if (data != null) {
-              fs.writeFileSync(cookiesPath, typeof data === 'string' ? data : JSON.stringify(data))
-              console.log('[download-douyin] Cookies written to:', cookiesPath)
-            } else {
-              console.warn('[download-douyin] No cookie data found in response')
-            }
-          } catch (e) {
-            console.warn('[download-douyin] Failed to fetch cookies:', e)
-          }
-        }
-        
-        if (!fs.existsSync(downloadDir)) {
-          fs.mkdirSync(downloadDir, { recursive: true })
-        }
-        
-        const spawnArgs = [profileUrl, '-c', cookiesPath, '-d', downloadDir, '-m', 'user']
-        console.log('Executing download user posts command:', exePath, ...spawnArgs)
-        
-        const cwd = getDouyinPackagedExeCwd()
-        if (!fs.existsSync(cwd)) {
-          fs.mkdirSync(cwd, { recursive: true })
-        }
-        
-        const child = spawn(exePath, spawnArgs, {
-          cwd,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
-        
-        let stdout = ''
-        let stderr = ''
-        let resolved = false
-        
-        const safeResolve = (result: any) => {
-          if (!resolved) {
-            resolved = true
-            resolve(result)
-          }
-        }
-        
-        child.stdout?.on('data', (chunk) => {
-          stdout += String(chunk)
-        })
-        
-        child.stderr?.on('data', (chunk) => {
-          stderr += String(chunk)
-        })
-        
-        child.on('close', (code) => {
-          console.log('Download user posts process finished')
-          console.log('stdout:', stdout)
-          console.log('stderr:', stderr)
-          
-          const finalResult = parseJsonFromStdout(stdout)
-          
-          if (finalResult && finalResult.status === 'success' && Array.isArray(finalResult.posts)) {
-            // Posts returned directly in stdout
-            safeResolve({
-              success: true,
-              posts: finalResult.posts
-            })
-          } else if (finalResult && finalResult.status === 'success' && finalResult.file_path) {
-            // Posts saved to file - read from file
-            try {
-              if (fs.existsSync(finalResult.file_path)) {
-                const fileContent = fs.readFileSync(finalResult.file_path, 'utf-8')
-                const fileData = JSON.parse(fileContent)
-                const posts = Array.isArray(fileData) ? fileData : (fileData.posts || fileData.aweme_list || [])
-                safeResolve({
-                  success: true,
-                  posts: posts
-                })
-              } else {
-                safeResolve({
-                  success: false,
-                  message: '结果文件不存在',
-                  error: `File not found: ${finalResult.file_path}`,
-                  posts: []
-                })
-              }
-            } catch (e: any) {
-              console.error('Failed to read posts file:', e)
-              safeResolve({
-                success: false,
-                message: '读取结果文件失败',
-                error: e.message,
-                posts: []
-              })
-            }
-          } else if (finalResult && finalResult.status === 'error') {
-            safeResolve({
-              success: false,
-              message: finalResult.message || '获取用户作品失败',
-              error: stderr || stdout,
-              posts: []
-            })
-          } else {
-            safeResolve({
-              success: false,
-              message: '无法解析结果',
-              error: stdout || stderr,
-              posts: []
-            })
-          }
-        })
-        
-        child.on('error', (err) => {
-          console.error('Download user posts spawn error:', err)
-          safeResolve({
-            success: false,
-            message: '启动程序失败',
-            error: err.message,
-            posts: []
-          })
-        })
-      } catch (error: any) {
-        console.error('Download user posts failed:', error)
-        resolve({
+    try {
+      const normalizedProfileUrl = normalizeDouyinUrlForDownloader(profileUrl)
+      const { exePath, searched } = resolveDouyinExePath()
+      if (!exePath) {
+        return {
           success: false,
-          message: 'Download user posts failed',
-          error: error instanceof Error ? error.message : String(error),
-          posts: []
-        })
+          message: DOUYIN_DOWNLOADER_MISSING_MESSAGE,
+          error: `File not found. Searched: ${searched.join('; ')}`,
+          posts: [],
+        }
       }
-    })
+
+      const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
+      await ensureDouyinCookiesFile(cookiesPath)
+
+      const resolveWorkDir = getUserDataPath('temp/profile-resolve')
+      if (!fs.existsSync(resolveWorkDir)) {
+        fs.mkdirSync(resolveWorkDir, { recursive: true })
+      }
+
+      const profileResolve = await resolveDouyinProfileUrl(
+        normalizedProfileUrl || profileUrl,
+        exePath,
+        cookiesPath,
+        resolveWorkDir
+      )
+      if (!profileResolve.ok) {
+        return {
+          success: false,
+          message: profileResolve.message,
+          error: profileResolve.message,
+          posts: [],
+        }
+      }
+
+      const effectiveProfileUrl = profileResolve.profileUrl
+      const downloadDir =
+        options?.downloadDir?.trim() || getUserPostsDownloadDir(effectiveProfileUrl)
+      if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true })
+      }
+
+      const spawnArgs = [effectiveProfileUrl, '-c', cookiesPath, '-d', downloadDir, '-m', 'user']
+      console.log('[download-douyin] user posts command:', exePath, ...spawnArgs)
+
+      const run = await runDouyinDownloader(exePath, spawnArgs, 'posts')
+      console.log('[download-douyin] user posts finished, stdout:', run.stdout)
+      if (run.stderr) console.log('[download-douyin] user posts stderr:', run.stderr)
+
+      const resolvedPosts = resolveDouyinUserPostsResult(
+        run.result,
+        run.stdout,
+        run.stderr,
+        downloadDir,
+        profileUrl
+      )
+
+      return {
+        ...resolvedPosts,
+        posts: resolvedPosts.posts || [],
+        resolvedProfileUrl:
+          profileResolve.resolvedFrom === 'video' || profileResolve.resolvedFrom === 'share'
+            ? effectiveProfileUrl
+            : undefined,
+        resolvedFrom: profileResolve.resolvedFrom,
+      }
+    } catch (error: any) {
+      console.error('Download user posts failed:', error)
+      const message = formatDouyinUserPostsError(
+        error instanceof Error ? error.message : String(error),
+        profileUrl
+      )
+      return {
+        success: false,
+        message,
+        error: message,
+        posts: [],
+      }
+    }
   })
 
   ipcMain.handle('upload-voice-and-transcribe', async (event, filePath: string, fileName: string) => {
@@ -638,7 +984,7 @@ export function registerDownloadHandlers(): void {
       const outputDir = getUserDataPath('voices/uploaded')
       if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true })
       
-      const voiceId = `uploaded_${Date.now()}`
+      const voiceId = `uploaded_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
       const ext = path.extname(fileName) || '.wav'
       const newFileName = `${voiceId}${ext}`
       const newFilePath = path.join(outputDir, newFileName)

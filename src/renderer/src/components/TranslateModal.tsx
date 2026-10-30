@@ -128,7 +128,7 @@ export function TranslateModal({
         {/* Header */}
         <div style={{ marginBottom: '16px', paddingBottom: '8px', borderBottom: '1px solid var(--ly-border)' }}>
           <h2 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: 'var(--ly-text)' }}>
-            翻译文案
+            语种翻译
           </h2>
         </div>
 
@@ -172,15 +172,15 @@ export function TranslateModal({
               rows={15}
               className="video-textarea"
               disabled={isTranslating}
-              placeholder="可先微调内容，再执行翻译文案"
+              placeholder="可先微调内容，再执行语种翻译"
             />
           </div>
           <div style={{ flex: 1 }}>
-            <label className="video-label">改写结果</label>
+            <label className="video-label">翻译结果</label>
             <textarea
               value={translatedText}
               onChange={(e) => setTranslatedText?.(e.target.value)}
-              placeholder={isTranslating ? '改写中..' : '翻译文案结果会显示在这里...'}
+              placeholder={isTranslating ? '翻译中..' : '语种翻译结果会显示在这里...'}
               rows={15}
               className="video-textarea"
               disabled={isTranslating}
@@ -197,7 +197,7 @@ export function TranslateModal({
                 disabled={isTranslating}
                 className="video-button video-button-primary"
               >
-                {isTranslating ? `改写中 ${translateProgress}%` : '开始改写'}
+                {isTranslating ? `翻译中 ${translateProgress}%` : '开始翻译'}
               </button>
               {isTranslating && (
                 <div className="video-progress">
@@ -213,7 +213,7 @@ export function TranslateModal({
                   disabled={isTranslating}
                   className="video-button video-button-primary"
                 >
-                  {isTranslating ? `改写中 ${translateProgress}%` : '重新改写'}
+                  {isTranslating ? `翻译中 ${translateProgress}%` : '重新翻译'}
                 </button>
                 <button
                   onClick={() => onComplete?.(translatedText)}

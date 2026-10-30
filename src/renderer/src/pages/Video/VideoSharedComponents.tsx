@@ -1171,25 +1171,154 @@ export function splitSubtitleByLanguage(text: string, lang: string): string {
     .join('\n')
 }
 
-// 确保Whisper字幕时间戳已加载
-export async function ensureWhisperSegmentsIfNeeded() {
+// 字幕编辑提示：换行=时间轴分段，视觉折行由模板 breakLength 处理
+export const SUBTITLE_EDIT_HINT =
+  '换行会拆分字幕时间轴；仅为排版请勿手动换行，成片会自动按约 12 字折行。修改后会重新对齐语音。'
+
+/** 字幕文案标签旁的 ? 说明按钮（Portal 浮层，避免被卡片 overflow 裁切） */
+export function SubtitleEditHintButton({ refreshing = false } = {}) {
+  const tip = refreshing ? '正在重新对齐字幕与语音…' : SUBTITLE_EDIT_HINT
+  const [open, setOpen] = useState(false)
+  const [style, setStyle] = useState({ top: 0, left: 0 })
+  const btnRef = useRef(null)
+  const hideTimerRef = useRef(null)
+
+  const updatePos = useCallback(() => {
+    const el = btnRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const width = 280
+    let left = rect.left
+    if (left + width > window.innerWidth - 12) {
+      left = Math.max(12, window.innerWidth - width - 12)
+    }
+    setStyle({ top: rect.bottom + 8, left })
+  }, [])
+
+  const showTip = useCallback(() => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current)
+      hideTimerRef.current = null
+    }
+    updatePos()
+    setOpen(true)
+  }, [updatePos])
+
+  const hideTip = useCallback(() => {
+    hideTimerRef.current = setTimeout(() => setOpen(false), 120)
+  }, [])
+
+  const keepTip = useCallback(() => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current)
+      hideTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const onReflow = () => updatePos()
+    window.addEventListener('scroll', onReflow, true)
+    window.addEventListener('resize', onReflow)
+    return () => {
+      window.removeEventListener('scroll', onReflow, true)
+      window.removeEventListener('resize', onReflow)
+    }
+  }, [open, updatePos])
+
+  useEffect(() => () => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+  }, [])
+
+  return jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, {
+    children: [
+      jsxRuntimeExports.jsx('button', {
+        ref: btnRef,
+        type: 'button',
+        className: 'video-help-btn',
+        'aria-label': '字幕换行说明',
+        onMouseEnter: showTip,
+        onMouseLeave: hideTip,
+        onFocus: showTip,
+        onBlur: hideTip,
+        children: '?',
+      }),
+      open && typeof document !== 'undefined' && ReactDOM.createPortal(
+        jsxRuntimeExports.jsx('div', {
+          className: 'video-help-tooltip-portal',
+          role: 'tooltip',
+          style: { top: `${style.top}px`, left: `${style.left}px` },
+          onMouseEnter: keepTip,
+          onMouseLeave: hideTip,
+          children: tip,
+        }),
+        document.body,
+      ),
+    ],
+  })
+}
+
+export function isWhisperAlignmentStale(
+  subtitleText: string,
+  whisperAlignedSubtitleText: string,
+): boolean {
+  const current = (subtitleText ?? '').trim()
+  if (!current) return true
+  return (whisperAlignedSubtitleText ?? '').trim() !== current
+}
+
+// 确保Whisper字幕时间戳已加载（文案变更后会自动重新对齐）
+export async function ensureWhisperSegmentsIfNeeded(options?: {
+  force?: boolean
+  subtitleText?: string
+}) {
   const state = useVideoPageStore.getState()
-  const { generatedAudioPath, subtitleText, whisperSegments, setWhisperSegments } = state
-  
-  if (!generatedAudioPath || !subtitleText?.trim()) return
-  if (whisperSegments?.length > 0) return
-  
+  const {
+    generatedAudioPath,
+    whisperSegments,
+    whisperAlignedSubtitleText,
+    setWhisperSegments,
+    setWhisperAlignedSubtitleText,
+  } = state
+  const alignText = (options?.subtitleText ?? state.subtitleText ?? '').trim()
+
+  if (!generatedAudioPath || !alignText) return
+
+  const stale = options?.force
+    || isWhisperAlignmentStale(alignText, whisperAlignedSubtitleText)
+  if (!stale && whisperSegments?.length > 0) return
+
+  if (stale && whisperSegments?.length > 0) {
+    setWhisperSegments([])
+  }
+
   try {
     const segments = await window.api.pluginProxyWhisperAlignRun({
       audioPath: generatedAudioPath,
-      subtitle: subtitleText.trim()
+      subtitle: alignText,
     })
     if (segments?.length > 0) {
       setWhisperSegments(segments)
+      setWhisperAlignedSubtitleText(alignText)
     }
   } catch (err) {
     console.error('Whisper字幕时间戳获取失败', err)
   }
+}
+
+/** 写入 Whisper 对齐结果并记录对应字幕文案 */
+export function commitWhisperAlignment(segments: any[], alignedText: string) {
+  const { setWhisperSegments, setWhisperAlignedSubtitleText } = useVideoPageStore.getState()
+  setWhisperSegments(segments)
+  const text = (alignedText ?? '').trim()
+  if (segments.length > 0 && text) {
+    setWhisperAlignedSubtitleText(text)
+  }
+}
+
+/** 字幕文案编辑完成后重新对齐 Whisper 时间轴 */
+export async function refreshWhisperSegmentsAfterSubtitleEdit() {
+  return ensureWhisperSegmentsIfNeeded({ force: true })
 }
 
 // 空白标题样式（用于移除标题）
@@ -1557,7 +1686,7 @@ function renderStaticSubtitle(canvas, subtitleEffect, text) {
 }
 
 // 成片模板预览卡片（完整版：支持视频标题叠加+字幕"
-function ThemeTemplatePreviewCard({ style, isSelected, onClick, videoUrl, imageUrl, mainTitleText, subTitleText, onDelete }) {
+function ThemeTemplatePreviewCard({ style, isSelected, onClick, videoUrl, imageUrl, mainTitleText, subTitleText, onDelete, generatedFirstFrameUrl }) {
   const videoRef = React.useRef(null)
   const canvasRef = React.useRef(null)
   const titleCanvasRef = React.useRef(null)
@@ -1715,13 +1844,10 @@ function ThemeTemplatePreviewCard({ style, isSelected, onClick, videoUrl, imageU
             })
           : jsxRuntimeExports.jsxs(React.Fragment, {
               children: [
-                videoUrl
-                  ? jsxRuntimeExports.jsx('video', {
-                      ref: videoRef,
-                      src: videoUrl,
-                      muted: true,
-                      playsInline: true,
-                      preload: 'metadata',
+                generatedFirstFrameUrl
+                  ? jsxRuntimeExports.jsx('img', {
+                      src: generatedFirstFrameUrl,
+                      alt: style.name,
                       style: {
                         position: 'absolute',
                         top: 0,
@@ -1730,11 +1856,17 @@ function ThemeTemplatePreviewCard({ style, isSelected, onClick, videoUrl, imageU
                         height: '100%',
                         objectFit: 'cover',
                       },
+                      onError: (e) => {
+                        if (e.currentTarget) e.currentTarget.style.display = 'none'
+                      },
                     })
-                  : imageUrl
-                    ? jsxRuntimeExports.jsx('img', {
-                        src: imageUrl,
-                        alt: style.name,
+                  : videoUrl
+                    ? jsxRuntimeExports.jsx('video', {
+                        ref: videoRef,
+                        src: videoUrl,
+                        muted: true,
+                        playsInline: true,
+                        preload: 'metadata',
                         style: {
                           position: 'absolute',
                           top: 0,
@@ -1743,19 +1875,32 @@ function ThemeTemplatePreviewCard({ style, isSelected, onClick, videoUrl, imageU
                           height: '100%',
                           objectFit: 'cover',
                         },
-                        onError: (e) => {
-                          if (e.currentTarget) e.currentTarget.style.display = 'none'
-                        },
                       })
-                    : jsxRuntimeExports.jsx('div', {
-                        style: {
-                          position: 'absolute',
-                          top: 0,
-                          left: 0,
-                          width: '100%',
-                          height: '100%',
-                          backgroundColor: '#1a1a1a',
-                          display: 'flex',
+                    : imageUrl
+                      ? jsxRuntimeExports.jsx('img', {
+                          src: imageUrl,
+                          alt: style.name,
+                          style: {
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'cover',
+                          },
+                          onError: (e) => {
+                            if (e.currentTarget) e.currentTarget.style.display = 'none'
+                          },
+                        })
+                      : jsxRuntimeExports.jsx('div', {
+                          style: {
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            backgroundColor: '#1a1a1a',
+                            display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
                           color: '#999',
@@ -1867,6 +2012,7 @@ export function TitleStyleModal({
   onCancel,
   onSaveCustomTheme,
   onDeleteCustomTheme,
+  generatedFirstFrameUrl,
 }) {
   const [customDuration, setCustomDuration] = useState(() => titleSegmentRange?.end ?? 5)
   const isLimited = isTitleSegmentRangeLimited(titleSegmentRange)
@@ -2058,6 +2204,7 @@ export function TitleStyleModal({
                   mainTitleText,
                   subTitleText,
                   onDelete: style.isCustom ? onDeleteCustomTheme : undefined,
+                  generatedFirstFrameUrl,
                 }, style.id || '__blank_title__')
               ),
             }),

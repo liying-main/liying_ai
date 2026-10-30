@@ -2,8 +2,14 @@ import { ipcMain, app } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { getUserDataPath } from '../local-server'
+import { standardizeAvatarForHeygem } from '../heygem-avatar-standard'
+import { getCloudResourcesDir } from '../resource-manager'
+import { resolveTemplateFontFamily } from '../title-font-map'
 
 function resolveAssetPath(segment: string, filename: string): string {
+  const cloudPath = path.join(getCloudResourcesDir(), segment, filename)
+  if (fs.existsSync(cloudPath)) return cloudPath
+
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', segment, filename)
   }
@@ -21,6 +27,9 @@ function resolveAssetPath(segment: string, filename: string): string {
 }
 
 function resolveAssetDir(segment: string): string {
+  const cloudDir = path.join(getCloudResourcesDir(), segment)
+  if (fs.existsSync(cloudDir)) return cloudDir
+
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'app.asar.unpacked', 'assets', segment)
   }
@@ -35,6 +44,10 @@ function resolveAssetDir(segment: string): string {
     if (fs.existsSync(p)) return p
   }
   return candidates[0]
+}
+
+function isRemoteUrl(value: unknown): value is string {
+  return typeof value === 'string' && /^https?:\/\//i.test(value)
 }
 
 function loadJsonSafe(filePath: string, defaultValue: any): any {
@@ -151,9 +164,13 @@ export function registerAssetsHandlers(): void {
         let previewImageWebPath: string | undefined
         const imgFile = savedStyle.previewImage
         if (imgFile) {
-          const imgPath = path.join(titleStylesDir, imgFile)
-          if (fs.existsSync(imgPath)) {
-            previewImageWebPath = `/assets/title-styles/${imgFile}`
+          if (isRemoteUrl(imgFile)) {
+            previewImageWebPath = imgFile
+          } else {
+            const imgPath = path.join(titleStylesDir, imgFile)
+            if (fs.existsSync(imgPath)) {
+              previewImageWebPath = `/assets/title-styles/${imgFile}`
+            }
           }
         }
         // Fallback: check for common extensions
@@ -169,55 +186,35 @@ export function registerAssetsHandlers(): void {
         
         // Check preview video exists
         let previewVideoWebPath: string | undefined
-        if (savedStyle.previewVideo) {
-          const videoPath = path.join(resolveAssetDir('videos'), savedStyle.previewVideo)
-          if (fs.existsSync(videoPath)) {
-            previewVideoWebPath = `/assets/videos/${savedStyle.previewVideo}`
+        const videoFile = savedStyle.previewVideo
+        if (videoFile) {
+          if (isRemoteUrl(videoFile)) {
+            previewVideoWebPath = videoFile
+          } else {
+            const titleStyleVideoPath = path.join(titleStylesDir, videoFile)
+            const builtinVideoPath = path.join(resolveAssetDir('videos'), videoFile)
+            if (fs.existsSync(titleStyleVideoPath)) {
+              previewVideoWebPath = `/assets/title-styles/${videoFile}`
+            } else if (fs.existsSync(builtinVideoPath)) {
+              previewVideoWebPath = `/assets/videos/${videoFile}`
+            }
+          }
+        }
+        if (!previewVideoWebPath) {
+          const candidate = path.join(titleStylesDir, savedStyle.id + '.mp4')
+          if (fs.existsSync(candidate)) {
+            previewVideoWebPath = `/assets/title-styles/${savedStyle.id}.mp4`
           }
         }
         
-        const styleObj: any = {
-          id: savedStyle.id,
-          name: savedStyle.name || savedStyle.id,
-          previewTitle: savedStyle.previewTitle,
-          previewSubtitle: savedStyle.previewSubtitle,
-          previewCaptions: savedStyle.previewCaptions,
-          hasSubTitle: savedStyle.hasSubTitle || false,
-          mainTitle: savedStyle.mainTitle || {
-            font: 'Arial',
-            fontSize: 48,
-            fontWeight: 400,
-            color: '#FFFFFF',
-            strokeColor: '#000000',
-            top: 100,
-            borderRadius: 10,
-            backgroundColor: 'transparent'
-          },
-          subTitle: savedStyle.subTitle || (savedStyle.hasSubTitle ? {
-            font: 'Arial',
-            fontSize: 36,
-            fontWeight: 400,
-            color: '#FFFFFF',
-            strokeColor: '#000000',
-            top: 50,
-            borderRadius: 10,
-            backgroundColor: 'transparent'
-          } : undefined),
-          subtitleEffect: savedStyle.subtitleEffect
-        }
-        // Only add previewImage if file exists
-        if (previewImageWebPath) {
-          styleObj.previewImage = previewImageWebPath
-        }
-        // Only add previewVideo if file exists
-        if (previewVideoWebPath) {
-          styleObj.previewVideo = previewVideoWebPath
-        }
-        styles.push(styleObj)
+        styles.push({
+          ...savedStyle,
+          previewImage: previewImageWebPath,
+          previewVideo: previewVideoWebPath
+        })
       }
       return styles
-    } catch (error) {
-      console.error('Failed to list builtin title styles:', error)
+    } catch {
       return []
     }
   })
@@ -287,7 +284,8 @@ export function registerAssetsHandlers(): void {
       const ext = path.extname(file).toLowerCase()
       if (FONT_EXTS.includes(ext)) {
         const filePath = path.join(fontsDir, file)
-        const fontFamily = path.basename(file, ext)
+        const fileStem = path.basename(file, ext)
+        const fontFamily = resolveTemplateFontFamily(fileStem)
         fonts.push({ path: filePath, fontFamily, fileName: file })
       }
     }
@@ -331,8 +329,13 @@ export function registerAssetsHandlers(): void {
       const videoId = `video_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
       const ext = path.extname(originalName) || '.mp4'
       const destPath = path.join(videosDir, `${videoId}${ext}`)
-      
-      fs.copyFileSync(sourcePath, destPath)
+
+      try {
+        await standardizeAvatarForHeygem(sourcePath, { outputPath: destPath })
+      } catch (e) {
+        console.warn('[HeyGem] library tea-spec failed, storing original:', e)
+        fs.copyFileSync(sourcePath, destPath)
+      }
       
       // Update config - use name without extension for consistency
       const configPath = path.join(getUserDataPath(), 'uploaded_videos_config.json')
@@ -379,6 +382,43 @@ export function registerAssetsHandlers(): void {
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
       
       return { success: true, file_path: destPath, bgm_id: bgmId }
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Upload PIP material (上传画中画素材，与智能剪辑共用 pip_resources_config.json)
+  ipcMain.handle('upload-pip-material', async (_, sourcePath: string, originalName: string) => {
+    try {
+      const ext = path.extname(originalName).toLowerCase()
+      const allowedExts = ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.png', '.jpg', '.jpeg', '.gif', '.webp']
+      if (!allowedExts.includes(ext)) {
+        return { success: false, error: '仅支持 MP4/MOV/WEBM 视频或 JPG/PNG/GIF/WEBP 图片' }
+      }
+
+      const pipDir = getUserDataPath('smartcut/pip')
+      if (!fs.existsSync(pipDir)) fs.mkdirSync(pipDir, { recursive: true })
+
+      const pipId = `pip_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
+      const destPath = path.join(pipDir, `${pipId}${ext}`).replace(/\\/g, '/')
+      fs.copyFileSync(sourcePath, destPath)
+
+      const nameWithoutExt = path.basename(originalName, path.extname(originalName))
+      const isImage = /\.(jpg|jpeg|png)$/i.test(originalName)
+      const item: Record<string, unknown> = {
+        id: pipId,
+        name: nameWithoutExt || originalName,
+        path: destPath,
+        uploadedAt: Date.now(),
+      }
+
+      const configPath = path.join(getUserDataPath(), 'pip_resources_config.json')
+      const config = loadJsonSafe(configPath, { items: [] })
+      config.items = config.items || []
+      config.items.push(item)
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
+
+      return { success: true, file_path: destPath, pip_id: pipId, is_image: isImage }
     } catch (error: any) {
       return { success: false, error: error.message }
     }

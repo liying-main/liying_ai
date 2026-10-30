@@ -26,6 +26,9 @@ import {
   templateSubtitleEffectToPartial,
   splitSubtitleByLanguage,
   ensureWhisperSegmentsIfNeeded,
+  refreshWhisperSegmentsAfterSubtitleEdit,
+  SubtitleEditHintButton,
+  commitWhisperAlignment,
   TitleStyleModal,
 } from './VideoSharedComponents'
 
@@ -36,7 +39,6 @@ import { SmartCutModal } from './VideoGenerateCard'
 import { llmService } from '../../api/llm'
 import { templateService } from '../../api/template'
 import { exceptionService } from '../../api/exception'
-import { useAd } from '../../components/AdContext'
 
 // Language name mapping
 const LANG_NAME_MAP: Record<string, string> = {
@@ -62,7 +64,6 @@ async function fetchWhisperSegmentsFromCloud(audioPath: string, subtitle: string
 }
 
 export function VideoSubtitleCard() {
-  const { openAd } = useAd();
   const showToast = useToast();
   const applyAllEffects = useApplyAllEffects();
   const videoHistory = useVideoGenerateHistory();
@@ -138,7 +139,45 @@ export function VideoSubtitleCard() {
     setWhisperSegments,
   } = useVideoPageStore();
   const userInfo = useUserInfoStore((s) => s.userInfo);
-  
+  const [isWhisperRefreshing, setIsWhisperRefreshing] = useState(false);
+
+  const handleSubtitleBlur = useCallback(async () => {
+    const text = (useVideoPageStore.getState().subtitleText ?? "").trim();
+    if (!generatedAudioPath || !text) return;
+    setIsWhisperRefreshing(true);
+    try {
+      await refreshWhisperSegmentsAfterSubtitleEdit();
+    } catch (err) {
+      console.error("字幕重新对齐失败", err);
+    } finally {
+      setIsWhisperRefreshing(false);
+    }
+  }, [generatedAudioPath]);
+
+  // 提取已生成视频的首帧，用于成片模板预览背景
+  const [generatedFirstFrameUrl, setGeneratedFirstFrameUrl] = useState("");
+  useEffect(() => {
+    const videoPath = generatedVideoPath?.trim();
+    if (!videoPath) {
+      setGeneratedFirstFrameUrl("");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await (window as any).api.extractFrameFromVideo(videoPath);
+        if (cancelled || !res.success || !res.image_path) return;
+        const urlRes = await (window as any).api.getLocalFileUrl(res.image_path);
+        if (!cancelled && urlRes.success && urlRes.url) {
+          setGeneratedFirstFrameUrl(urlRes.url);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [generatedVideoPath]);
+
   useEffect(() => {
     const cfg = subtitleEffectConfig;
     if (!cfg) return;
@@ -225,7 +264,81 @@ export function VideoSubtitleCard() {
     }
   }, [bgmEffectConfig, setSelectedBgmId]);
   const handleUploadBgmMaterial = async (event) => {
-    openAd();
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const uploadCategory = pendingUploadCategoryRef.current.trim() || "推荐";
+    pendingUploadCategoryRef.current = "";
+    setBgmUploadText("上传");
+    const fileExtension = file.name.toLowerCase().split(".").pop();
+    const allowedExtensions = ["wav", "mp3", "m4a"];
+    const allowedMimeTypes = [
+      "audio/wav",
+      "audio/mpeg",
+      "audio/mp3",
+      "audio/mp4",
+      "audio/x-m4a",
+    ];
+    if (
+      !allowedExtensions.includes(fileExtension || "") &&
+      !allowedMimeTypes.includes(file.type)
+    ) {
+      showToast("只支持上传WAV、MP3、M4A 格式的音频文件", "info");
+      setBgmUploadText("上传");
+      event.target.value = "";
+      return;
+    }
+    setIsUploadingBgm(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const base64Data = e.target?.result;
+          const base64Content = base64Data.split(",")[1];
+          const tempFileName = `temp_${Date.now()}_${file.name}`;
+          const saveResult = await window.api.saveFileFromBase64(
+            base64Content,
+            tempFileName,
+            "temp/bgms",
+          );
+          if (!saveResult.success || !saveResult.file_path) {
+            showToast("保存音频文件失败", "error");
+            setIsUploadingBgm(false);
+            return;
+          }
+          const uploadResult = await window.api.uploadBgmMaterial(
+            saveResult.file_path,
+            file.name,
+            uploadCategory,
+          );
+          if (uploadResult.success && uploadResult.file_path) {
+            const cfg = await window.api.loadUploadedBgmsConfig();
+            const nextBgms = (cfg.bgms ?? []).map((b) =>
+              b.id === uploadResult.bgm_id
+                ? { ...b, category: uploadCategory }
+                : b,
+            );
+            await window.api.saveUploadedBgmsConfig({ bgms: nextBgms });
+            setUploadedBgms(nextBgms);
+            setSelectedBgmId(uploadResult.bgm_id || "");
+          } else {
+            showToast(`上传失败: ${uploadResult.error || "未知错误"}`, "error");
+          }
+        } catch (error) {
+          console.error("Upload bgm error:", error);
+          const err = error;
+          showToast(`上传失败: ${err.message || "未知错误"}`, "error");
+        } finally {
+          setIsUploadingBgm(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Read file error:", error);
+      const err = error;
+      showToast(`上传失败: ${err.message || "未知错误"}`, "error");
+      setIsUploadingBgm(false);
+    }
+    event.target.value = "";
   };
   const prepareClipConfigs = (
     subtitleOverride,
@@ -420,7 +533,37 @@ export function VideoSubtitleCard() {
     }
   };
   const handleClipAll = async () => {
-    openAd();
+    if (activeProcessingType) return;
+    try {
+      prepareClipConfigs();
+      const st = useVideoPageStore.getState();
+      console.log('[handleClipAll] subtitleEnabled:', st.subtitleEnabled, 'bgmEnabled:', st.bgmEnabled, 'bgmEffectConfig:', st.bgmEffectConfig, 'titleEffectConfig:', !!st.titleEffectConfig);
+      if (
+        st.subtitleEnabled &&
+        st.generatedAudioPath &&
+        (st.subtitleText ?? "").trim()
+      ) {
+        useVideoPageStore.getState().setActiveProcessingType("subtitle");
+        useVideoPageStore.getState().setProcessingProgress(5);
+        try {
+          await ensureWhisperSegmentsIfNeeded();
+        } finally {
+          useVideoPageStore.getState().setActiveProcessingType(null);
+          useVideoPageStore.getState().setProcessingProgress(0);
+        }
+      }
+      await applyAllEffects("subtitle", {
+        title: false,
+        subtitle: false,
+        bgm: false,
+      });
+      await videoHistory.updateLatestSnapshot();
+    } catch (err) {
+      console.error('[handleClipAll] error:', err);
+      showToast(`润色失败: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      useVideoPageStore.getState().setActiveProcessingType(null);
+      useVideoPageStore.getState().setProcessingProgress(0);
+    }
   };
   const [showSmartCutModal, setShowSmartCutModal] =
     useState(false);
@@ -457,12 +600,13 @@ export function VideoSubtitleCard() {
     showTitleStyleModal,
   ]);
   const handleOpenSmartCut = () => {
-    openAd();
+    // if (!generatedVideoPath) {
+    //   showToast("请先生成主视频，再使用智能精剪, "info");
+    //   return;
+    // }
+    setShowSmartCutModal(true);
   };
   const handleConfirmSelectTitleStyle = async () => {
-    openAd();
-  };
-  const _handleConfirmSelectTitleStyle_disabled = async () => {
     if (activeProcessingType || !selectedTitleStyle) return;
     setSelectedTitleStyleId(selectedTitleStyle.id);
     const hasMainVideo = !!(
@@ -600,7 +744,7 @@ export function VideoSubtitleCard() {
                   subtitleSeed,
                 );
                 console.log("云端识别字幕时间戳", segments);
-                if (segments.length) setWhisperSegments(segments);
+                if (segments.length) commitWhisperAlignment(segments, subtitleSeed);
                 else setWhisperSegments([]);
               } catch (err) {
                 console.log("首次确认模板时 Whisper 字幕时间戳获取失败", err);
@@ -734,7 +878,14 @@ export function VideoSubtitleCard() {
   const openSmartcutPreview = () =>
     phoneModal.openPhoneModal(smartcutPreviewUrl);
   const handleDownloadSmartcutPreviewVideo = async () => {
-    openAd();
+    if (!effectVideoPath) {
+      showToast("无可下载的视频", "info");
+      return;
+    }
+    const result = await window.api.saveLocalFileAs(effectVideoPath);
+    if (result.canceled) return;
+    if (result.success && result.filePath) showToast("视频已保存", "success");
+    else showToast(result.error || "保存失败", "error");
   };
   return jsxRuntimeExports.jsxs(React.Fragment, {
     children: [
@@ -795,13 +946,22 @@ export function VideoSubtitleCard() {
                   jsxRuntimeExports.jsxs("div", {
                     className: "video-form-group",
                     children: [
-                      jsxRuntimeExports.jsx("label", {
-                        className: "video-label",
-                        children: "字幕文案",
+                      jsxRuntimeExports.jsxs("div", {
+                        className: "video-label-row",
+                        children: [
+                          jsxRuntimeExports.jsx("label", {
+                            className: "video-label",
+                            children: "字幕文案",
+                          }),
+                          jsxRuntimeExports.jsx(SubtitleEditHintButton, {
+                            refreshing: isWhisperRefreshing,
+                          }),
+                        ],
                       }),
                       jsxRuntimeExports.jsx("textarea", {
                         value: subtitleText,
                         onChange: (e) => setSubtitleText(e.target.value),
+                        onBlur: handleSubtitleBlur,
                         placeholder: "字幕文案会显示在这里...",
                         rows: 8,
                         className: "video-textarea",
@@ -824,7 +984,20 @@ export function VideoSubtitleCard() {
                               BgmGroupedPreviewSelect,
                               {
                                 value: selectedBgmId,
-                                onChange: setSelectedBgmId,
+                                onChange: (id) => {
+                                  setSelectedBgmId(id);
+                                  if (id) {
+                                    setBgmEnabled(true);
+                                    setBgmEffectConfig({
+                                      selectedBgmId: id,
+                                      volume: bgmVolume,
+                                      voiceVolume: voiceVolume,
+                                    });
+                                  } else {
+                                    setBgmEnabled(false);
+                                    setBgmEffectConfig(null);
+                                  }
+                                },
                                 placeholder: allBgms.length
                                   ? "请选择配乐"
                                   : "暂无可用配乐",
@@ -833,17 +1006,36 @@ export function VideoSubtitleCard() {
                               },
                             ),
                           }),
-                          jsxRuntimeExports.jsx("div", {
+                          jsxRuntimeExports.jsxs("div", {
                             className: "video-select-upload-row__upload",
-                            children: jsxRuntimeExports.jsx("div", {
-                              className: "video-file-input video-file-input-wrap",
-                              onClick: () => openAd(),
-                              style: { cursor: "pointer" },
-                              children: jsxRuntimeExports.jsx("span", {
-                                className: "video-file-input-text",
-                                children: "上传",
+                            children: [
+                              jsxRuntimeExports.jsx("button", {
+                                type: "button",
+                                className: `video-file-input video-file-input-wrap ${isUploadingBgm ? "disabled" : ""}`,
+                                disabled: isUploadingBgm,
+                                onClick: () => {
+                                  if (isUploadingBgm) return;
+                                  setUploadCategoryModalOpen(true);
+                                },
+                                children: jsxRuntimeExports.jsx(
+                                  "span",
+                                  {
+                                    className: "video-file-input-text",
+                                    children: bgmUploadText,
+                                  },
+                                ),
                               }),
-                            }),
+                              jsxRuntimeExports.jsx("input", {
+                                ref: bgmFileInputRef,
+                                type: "file",
+                                accept:
+                                  "audio/wav,audio/mpeg,audio/mp3,audio/mp4,.wav,.mp3,.m4a",
+                                className: "video-file-input-real",
+                                style: { display: "none" },
+                                onChange: handleUploadBgmMaterial,
+                                disabled: isUploadingBgm,
+                              }),
+                            ],
                           }),
                         ],
                       }),
@@ -888,7 +1080,11 @@ export function VideoSubtitleCard() {
                               step: 0.1,
                               value: voiceVolume,
                               className: "video-range",
-                              onChange: (v) => setVoiceVolume(v),
+                              onChange: (v) => {
+                                setVoiceVolume(v);
+                                const cur = useVideoPageStore.getState().bgmEffectConfig;
+                                if (cur) setBgmEffectConfig({ ...cur, voiceVolume: v });
+                              },
                               format: (v) => `${Math.round(v * 100)}%`,
                             },
                           ),
@@ -909,7 +1105,11 @@ export function VideoSubtitleCard() {
                               step: 0.1,
                               value: bgmVolume,
                               className: "video-range",
-                              onChange: (v) => setBgmVolume(v),
+                              onChange: (v) => {
+                                setBgmVolume(v);
+                                const cur = useVideoPageStore.getState().bgmEffectConfig;
+                                if (cur) setBgmEffectConfig({ ...cur, volume: v });
+                              },
                               format: (v) => `${Math.round(v * 100)}%`,
                             },
                           ),
@@ -956,7 +1156,7 @@ export function VideoSubtitleCard() {
                       children: [
                         jsxRuntimeExports.jsxs("button", {
                           type: "button",
-                          onClick: () => openAd(),
+                          onClick: () => setShowTitleStyleModal(true),
                           className: "video-button video-button-primary",
                           style: { flex: 1 },
                           children: [
@@ -1136,6 +1336,7 @@ export function VideoSubtitleCard() {
         subTitle,
         onConfirm: handleConfirmSelectTitleStyle,
         onCancel: handleCancelSelectTitleStyle,
+        generatedFirstFrameUrl,
       }),
       jsxRuntimeExports.jsx(SmartCutModal, {
         show: showSmartCutModal,

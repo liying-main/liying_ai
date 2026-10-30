@@ -1,69 +1,65 @@
-export const API_BASE = (import.meta as any).env?.VITE_API_BASE || 'http://47.105.45.25:8001'
+/**
+ * 开源版 HTTP 客户端
+ *
+ * 原版这里包含登录令牌、刷新令牌、VIP 到期、卡密失效跳转等一整套账号逻辑，
+ * 开源版没有账号体系，全部移除；底座指向中转站。
+ */
+import { STATION_BASE_URL } from '../../../shared/station'
 
-// Stub auth functions (no-op, no backend auth)
-export function getStoredToken(): string | null { return null }
-export function setStoredToken(_token: string): void {}
-export function clearStoredToken(): void {}
-export function setRefreshToken(_token: string): void {}
-export function onAuthStateChange(_cb: (isLoggedIn: boolean) => void): () => void { return () => {} }
-export function getAuthRedirectMessage(): string | null { return null }
-export function setRefreshTokenHandler(_handler: (refreshToken: string) => Promise<any>): void {}
-export async function ensureValidToken(): Promise<string | null> { return null }
+// 开源版：底座指向中转站，不再依赖私有后端
+export const API_BASE = (import.meta as any).env?.VITE_API_BASE || STATION_BASE_URL
 
-declare const __APP_VERSION__: string
-export function getClientApiVersion(): string {
-  return typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.0.1'
+/** 兼容旧调用：开源版没有令牌 */
+export async function ensureValidToken(): Promise<string | null> {
+  return null
 }
 
-function appVersionHeaders(): Record<string, string> {
-  return { 'X-App-Version': getClientApiVersion() }
+export function getStoredToken(): string | null {
+  return null
+}
+
+export function setStoredToken(_token: string): void {
+  /* 开源版没有登录 */
+}
+
+export function clearStoredToken(): void {
+  /* 开源版没有登录 */
+}
+
+export function onAuthStateChange(_callback: (isLoggedIn: boolean) => void): () => void {
+  return () => {}
 }
 
 export class ApiClient {
-  async request<T = any>(url: string, config: RequestInit & { skipAuth?: boolean; skipRefresh?: boolean } = {}): Promise<T> {
-    const { skipAuth = false, skipRefresh = false, headers = {}, ...restConfig } = config
-
-    const requestHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(headers as Record<string, string>),
-      ...appVersionHeaders()
-    }
-
-    const fullUrl = url.startsWith('http') ? url : `${API_BASE}${url}`
-    
-    const response = await fetch(fullUrl, { ...restConfig, headers: requestHeaders })
-    const data = await response.json()
-
-    if (data.code !== undefined && data.code !== 0 && data.code !== 1000) {
-      throw new Error(data.message || '请求失败')
-    }
-
-    return data
+  async get(url: string, config: any = {}) {
+    return this.request('GET', url, undefined, config)
   }
 
-  async get<T = any>(url: string, config?: RequestInit & { skipAuth?: boolean }): Promise<T> {
-    return this.request<T>(url, { ...config, method: 'GET' })
+  async post(url: string, data?: any, config: any = {}) {
+    return this.request('POST', url, data, config)
   }
 
-  async post<T = any>(url: string, data?: any, config?: RequestInit & { skipAuth?: boolean }): Promise<T> {
-    return this.request<T>(url, {
-      ...config,
-      method: 'POST',
-      body: data ? JSON.stringify(data) : undefined
+  async put(url: string, data?: any, config: any = {}) {
+    return this.request('PUT', url, data, config)
+  }
+
+  async delete(url: string, config: any = {}) {
+    return this.request('DELETE', url, undefined, config)
+  }
+
+  private async request(method: string, url: string, data?: any, config: any = {}) {
+    const response = await fetch(`${API_BASE}${url}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(config.headers || {}) },
+      body: data === undefined ? undefined : JSON.stringify(data),
     })
-  }
-
-  async put<T = any>(url: string, data?: any, config?: RequestInit & { skipAuth?: boolean }): Promise<T> {
-    return this.request<T>(url, {
-      ...config,
-      method: 'PUT',
-      body: data ? JSON.stringify(data) : undefined
-    })
-  }
-
-  async delete<T = any>(url: string, config?: RequestInit & { skipAuth?: boolean }): Promise<T> {
-    return this.request<T>(url, { ...config, method: 'DELETE' })
+    if (!response.ok) {
+      throw new Error(`请求失败：HTTP ${response.status}`)
+    }
+    const payload = await response.json().catch(() => ({}))
+    return { ...payload, data: payload?.data ?? payload }
   }
 }
 
 export const apiClient = new ApiClient()
+

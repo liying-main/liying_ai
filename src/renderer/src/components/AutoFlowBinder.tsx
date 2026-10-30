@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useVideoPageStore } from '../store/VideoPageStore'
 import { useToast } from '../hooks/useToast'
 import { useApplyAllEffects } from '../hooks/useApplyAllEffects'
+import { useVideoGenerateHistory } from '../hooks/useVideoGenerateHistory'
 import { templateService, llmService } from '../api'
 
 const TTS_EMOTION_CUSTOM_VALUE = 'custom'
@@ -118,6 +119,7 @@ function pickScriptForAutoFlow(state: any): { text: string; language: string } {
 export function AutoFlowBinder() {
   const showToast = useToast()
   const applyAllEffects = useApplyAllEffects()
+  const { saveNewSnapshot, updateLatestSnapshot } = useVideoGenerateHistory()
 
   useEffect(() => {
     useVideoPageStore.getState().setRunAutoFlow(async () => {
@@ -281,6 +283,11 @@ export function AutoFlowBinder() {
           if (preview.success) {
             useVideoPageStore.getState().setGeneratedVideoPreview(preview.url || '')
           }
+
+          await saveNewSnapshot({
+            originalVideoPath: downloadResult.file_path,
+            generatedVideoPath: downloadResult.file_path,
+          })
         }
 
         // Step 3: Insert Title
@@ -349,10 +356,13 @@ export function AutoFlowBinder() {
             : allBgms[0]
 
           useVideoPageStore.getState().setBgmEnabled(true)
+          useVideoPageStore.getState().setSelectedBgmId(picked.id)
+          // Use user-configured volumes from store if available, otherwise use defaults
+          const prevBgmCfg = useVideoPageStore.getState().bgmEffectConfig
           useVideoPageStore.getState().setBgmEffectConfig({
             selectedBgmId: picked.id,
-            volume: DEFAULT_BGM_CARD_MUSIC_VOLUME,
-            voiceVolume: DEFAULT_BGM_CARD_VOICE_VOLUME
+            volume: (prevBgmCfg && typeof prevBgmCfg.volume === 'number') ? prevBgmCfg.volume : DEFAULT_BGM_CARD_MUSIC_VOLUME,
+            voiceVolume: (prevBgmCfg && typeof prevBgmCfg.voiceVolume === 'number') ? prevBgmCfg.voiceVolume : DEFAULT_BGM_CARD_VOICE_VOLUME
           })
 
           await applyAllEffects('bgm', { title: true, subtitle: true })
@@ -444,6 +454,7 @@ export function AutoFlowBinder() {
           }
         }
 
+        await updateLatestSnapshot()
         setStep('done')
         showToast('一键处理完成', 'success')
       } catch (e) {
@@ -463,7 +474,7 @@ export function AutoFlowBinder() {
     return () => {
       useVideoPageStore.getState().setRunAutoFlow(null)
     }
-  }, [applyAllEffects, showToast])
+  }, [applyAllEffects, showToast, saveNewSnapshot, updateLatestSnapshot])
 
   return null
 }

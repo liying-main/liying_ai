@@ -3,11 +3,13 @@ import cors from 'cors'
 import { app } from 'electron'
 import { join } from 'path'
 import fs from 'fs'
+import { getCloudResourcesDir } from './resource-manager'
 
 let localFileServer: express.Express | null = null
 let localFileServerPort = 0
 let appDataBaseDir = ''
 let assetsBaseDir = ''
+let assetsBaseDirs: string[] = []
 
 export function getUserDataPath(subPath = ''): string {
   const userDataDir = app.getPath('userData')
@@ -41,12 +43,14 @@ export function getLocalFileUrl(filePath: string): string | null {
     return `http://127.0.0.1:${localFileServerPort}/app-data2/${urlPath}`
   }
   
-  // Check if file is in assets directory
-  const normalizedAssetsDir = require('path').resolve(assetsBaseDir)
-  if (normalizedFilePath.startsWith(normalizedAssetsDir + require('path').sep)) {
-    const relativePath = normalizedFilePath.slice(normalizedAssetsDir.length + 1)
-    const urlPath = relativePath.split(require('path').sep).join('/')
-    return `http://127.0.0.1:${localFileServerPort}/assets/${urlPath}`
+  // Check if file is in any assets directory
+  for (const dir of assetsBaseDirs) {
+    const normalizedAssetsDir = require('path').resolve(dir)
+    if (normalizedFilePath.startsWith(normalizedAssetsDir + require('path').sep)) {
+      const relativePath = normalizedFilePath.slice(normalizedAssetsDir.length + 1)
+      const urlPath = relativePath.split(require('path').sep).join('/')
+      return `http://127.0.0.1:${localFileServerPort}/assets/${urlPath}`
+    }
   }
   
   return null
@@ -72,11 +76,18 @@ export function startLocalFileServer(): void {
   } else {
     assetsBaseDir = join(process.cwd(), 'assets')
   }
+  const cloudResourcesDir = getCloudResourcesDir()
+  const bundledAssetsDir = app.isPackaged
+    ? join(app.getAppPath(), 'out', 'renderer', 'assets')
+    : join(process.cwd(), 'src', 'renderer', 'public', 'assets')
+  assetsBaseDirs = [cloudResourcesDir, assetsBaseDir, bundledAssetsDir]
   
   const expressApp = express()
   expressApp.use(cors())
   expressApp.use('/app-data2', express.static(appDataBaseDir))
+  expressApp.use('/assets', express.static(cloudResourcesDir))
   expressApp.use('/assets', express.static(assetsBaseDir))
+  expressApp.use('/assets', express.static(bundledAssetsDir))
   
   // Error handler to suppress RangeNotSatisfiableError
   expressApp.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {

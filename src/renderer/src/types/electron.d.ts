@@ -18,6 +18,7 @@ interface SaveFileResult {
   success: boolean
   file_path?: string
   error?: string
+  removed_video_ids?: string[]
 }
 
 interface SaveLocalFileAsResult {
@@ -32,6 +33,8 @@ interface DouyinPostsResult {
   posts?: Array<{ desc: string; [key: string]: any }>
   message?: string
   error?: string
+  resolvedProfileUrl?: string
+  resolvedFrom?: 'direct' | 'share' | 'video'
 }
 
 interface VoiceItem {
@@ -106,7 +109,22 @@ interface DownloadAudioOptions {
   audioSpeed?: number
 }
 
+interface CloudResourceProgress {
+  status: 'checking' | 'ready' | 'downloading' | 'verifying' | 'extracting' | 'complete' | 'error'
+  name?: string
+  label?: string
+  index?: number
+  total?: number
+  transferred?: number
+  totalBytes?: number
+  percent?: number
+  message?: string
+}
+
 interface ElectronAPI {
+  getStationConfig: () => Promise<{ baseUrl: string; apiKey: string }>
+  saveStationConfig: (patch: { baseUrl?: string; apiKey?: string }) => Promise<{ baseUrl: string; apiKey: string }>
+  testStationConfig: (config: { baseUrl: string; apiKey: string }) => Promise<{ ok: boolean; message: string }>
   // Window controls
   minimizeWindow: () => Promise<void>
   maximizeWindow: () => Promise<void>
@@ -118,7 +136,8 @@ interface ElectronAPI {
   logToMain: (...args: any[]) => Promise<{ success: boolean }>
 
   // File operations
-  selectFile: (options?: any) => Promise<{ canceled: boolean; filePaths: string[] }>
+  selectFile: (options?: any) => Promise<string | string[] | null>
+  selectFiles: (options?: any) => Promise<{ canceled: boolean; filePaths: string[] }>
   selectDirectory: (options?: any) => Promise<{ canceled: boolean; filePaths: string[] }>
   saveLocalFileAs: (sourcePath: string) => Promise<SaveLocalFileAsResult>
   getAssetsPath: (relativePath: string) => Promise<string>
@@ -127,8 +146,15 @@ interface ElectronAPI {
   listUserDataFiles: (subPath: string, recursive?: boolean) => Promise<string[]>
   deleteUserDataFile: (filePath: string) => Promise<{ success: boolean }>
   getLocalFileUrl: (filePath: string) => Promise<LocalFileUrlResult>
+  getSmartcutPreviewUrl: (filePath: string) => Promise<LocalFileUrlResult & { resolvedPath?: string }>
+  ensureSmartcutPreviewVideo: (filePath: string) => Promise<{ success: boolean; file_path?: string; error?: string }>
+  ensureCloudResources: () => Promise<{ success: boolean; error?: string }>
+  isCloudResourcesReady: () => Promise<boolean>
+  getCloudResourcesDir: () => Promise<string>
+  onCloudResourceProgress: (callback: (data: CloudResourceProgress) => void) => () => void
   readFileAsBase64: (filePath: string) => Promise<string>
   saveFileFromBase64: (base64: string, fileName: string, subPath?: string) => Promise<SaveFileResult>
+  copyLocalFileToUserData: (sourcePath: string, originalName: string, subPath?: string) => Promise<SaveFileResult>
 
   // Video history
   getVideoGenerateHistory: () => Promise<any[]>
@@ -164,11 +190,33 @@ interface ElectronAPI {
   saveUploadedBgmsConfig: (config: any) => Promise<{ success: boolean }>
   loadUploadedVideosConfig: () => Promise<UploadedConfig<VideoItem>>
   saveUploadedVideosConfig: (config: any) => Promise<{ success: boolean }>
+  uploadVideoMaterial: (sourcePath: string, originalName: string) => Promise<SaveFileResult & { video_id?: string }>
+  uploadBgmMaterial: (sourcePath: string, originalName: string, category?: string) => Promise<SaveFileResult & { bgm_id?: string }>
+  uploadPipMaterial: (sourcePath: string, originalName: string) => Promise<SaveFileResult & { pip_id?: string; is_image?: boolean }>
+  loadMixResourcesConfig: () => Promise<{ items: any[] }>
+  saveMixResourcesConfig: (config: any) => Promise<{ success: boolean }>
+  loadPipResourcesConfig: () => Promise<{ items: any[] }>
+  savePipResourcesConfig: (config: any) => Promise<{ success: boolean }>
 
   // Platform publishing
   browserOpenPlatform: (platform: string) => Promise<void>
   browserNavigate: (platform: string, url: string) => Promise<void>
-  browserRunPublishFlow: (platform: string, params: any) => Promise<{ success: boolean }>
+  browserRunPublishFlow: (platform: string, params: any) => Promise<{ success: boolean; message?: string }>
+  browserLoginAccount: (params: { platform: string; userDataDir?: string; accountId?: string }) => Promise<{ success: boolean; message?: string; error?: string }>
+  browserOpenAccount: (params: { platform: string; userDataDir?: string; accountId?: string }) => Promise<{ success: boolean; message?: string; error?: string; url?: string }>
+  browserCheckAccountStatus: (params: { platform: string; userDataDir?: string; accountId?: string }) => Promise<{ success: boolean; is_valid?: boolean; message?: string; current_url?: string }>
+  getPublishAccounts: () => Promise<any[]>
+  savePublishAccounts: (list: any[]) => Promise<{ success: boolean; error?: string }>
+  getPublishTasks: () => Promise<any[]>
+  savePublishTasks: (list: any[]) => Promise<{ success: boolean; error?: string }>
+  ensurePublishProfileDir: (accountId: string) => Promise<{ success: boolean; userDataDir?: string; error?: string }>
+  onPublishAccountStatusChanged: (callback: (data: {
+    accountId: string
+    platform: string
+    is_valid: boolean
+    message?: string
+    current_url?: string
+  }) => void) => () => void
 
   // Download operations
   downloadDouyinVideo: (videoUrl: string) => Promise<DownloadResult>

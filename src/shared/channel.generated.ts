@@ -3,9 +3,10 @@ export const CHANNEL = {
   id: "default",
   appId: "com.liying.ai",
   packageName: "liying-ai",
-  productName: "厉影AI",
-  description: "厉影AI - AI视频处理工具",
+  productName: "厉影AI 数字人",
+  description: "厉影AI 数字人 - 免费开源客户端",
   titleLeft: "厉影",
   titleMiddle: "AI",
-  titleRight: ""
+  titleRight: "数字人",
+  loginSubtitle: "免费开源客户端 · 文案、配音与数字人创作"
 } as const

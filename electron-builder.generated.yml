@@ -1,0 +1,85 @@
+appId: com.liying.ai
+productName: 厉影AI 数字人
+directories:
+  buildResources: build
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/**/*'
+  - '!electron.vite.config.*'
+  - '!.env*'
+  - '!.build-env*'
+  - '!.build-meta.json'
+  - '!scripts/**/*'
+  - '!docs/**/*'
+  - '!channels/**/*'
+  - '!*.bat'
+  - '!*.sh'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!out/renderer/assets/bgms/**/*'
+  - '!out/renderer/assets/fonts/**/*'
+  - '!out/renderer/assets/videos/**/*'
+  - '!out/renderer/assets/voices/*.{wav,mp3,m4a}'
+  - '!out/renderer/assets/title-styles/**/*'
+  - '!assets/**/*'
+  - '!tool-zips/**/*'
+  - '!resources/**/*'
+  - '!dist/**/*'
+  - '!.tmp/**/*'
+  - '!.git/**/*'
+  - '!*.zip'
+  - '!*.7z'
+  - '!*.rar'
+  - '!*.log'
+  - '!build-*.log'
+  - '!temp-test-profile/**/*'
+  - '!playwright-report/**/*'
+  - '!test-results/**/*'
+asarUnpack:
+  - ffmpeg/**/*
+  - chrome/**/*
+  - douyin/**/*
+  - node_modules/@napi-rs/**/*
+afterPack: build/afterPack.cjs
+win:
+  icon: build/icon.ico
+  executableName: liying-ai
+  signAndEditExecutable: false
+  target:
+    - nsis
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+mac:
+  icon: build/icon.icns
+  category: public.app-category.video
+  minimumSystemVersion: "12.0"
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  extendInfo:
+    LSEnvironment:
+      MallocNanoZone: "0"
+    NSCameraUsageDescription: Application requests access to the device's camera.
+    NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    NSHighResolutionCapable: true
+    NSSupportsAutomaticGraphicsSwitching: true
+dmg:
+  artifactName: ${name}-${version}-mac-${arch}.${ext}
+extraMetadata:
+  name: liying-ai
+  description: 厉影AI 数字人 - 免费开源客户端

@@ -217,7 +217,7 @@ export function AiLegalModal({
         {/* Header */}
         <div style={{ marginBottom: '16px', paddingBottom: '8px', borderBottom: '1px solid var(--ly-border)' }}>
           <h2 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: 'var(--ly-text)' }}>
-            AI法务
+            合规审查
           </h2>
         </div>
 
@@ -258,11 +258,11 @@ export function AiLegalModal({
 
           {/* Right: Reviewed text */}
           <div style={{ flex: 1, minWidth: 0 }}>
-            <label className="video-label">法务审核后文案</label>
+            <label className="video-label">合规审查后文案</label>
             <textarea
               value={reviewedText}
               onChange={(e) => setReviewedText?.(e.target.value)}
-              placeholder={isReviewing ? 'AI法务审核中..' : '审核后的文案将显示在这里...'}
+              placeholder={isReviewing ? '合规审查中..' : '审查后的文案将显示在这里...'}
               rows={12}
               className="video-textarea"
               disabled={isReviewing}
@@ -277,7 +277,7 @@ export function AiLegalModal({
 
         {/* AI suggestions */}
         <div className="video-form-group" style={{ marginBottom: '16px' }}>
-          <label className="video-label">AI法务修改意见</label>
+          <label className="video-label">合规审查修改意见</label>
           <textarea
             value={suggestions}
             onChange={(e) => setSuggestions?.(e.target.value)}
@@ -297,7 +297,7 @@ export function AiLegalModal({
                 disabled={isReviewing}
                 className="video-button video-button-primary"
               >
-                {isReviewing ? `审核中 ${progress}%` : '开始法务审核'}
+                {isReviewing ? `审查中 ${progress}%` : '开始合规审查'}
               </button>
               {isReviewing && (
                 <div className="video-progress">

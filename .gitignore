@@ -1,5 +1,42 @@
-node_modules/
-out/
-dist/
+node_modules
+dist
+out
 *.tsbuildinfo
+build-*.log
+chrome
+douyin
+ffmpeg
+assets
+tool-zips
 .env
+.build-env
+.build-env.*
+.build-meta.json
+.env.*
+!.env.example
+electron.vite.config.*.mjs
+liying-pc.zip
+temp-test-profile/
+temp-electron-vite-dev*.log
+
+# macOS binaries (跨平台打包用，不要提交)
+build/icon.icns
+ffmpeg/bin/ffmpeg-arm64
+ffmpeg/bin/ffprobe-arm64
+ffmpeg/bin/ffmpeg-x64
+ffmpeg/bin/ffprobe-x64
+douyin/downloadDouyinVideo-arm64
+douyin/downloadDouyinVideo-x64
+
+# 竞品DMG解包工作目录 (不要提交)
+../unpack-mac-dmg/
+../unpack-mac-dmg-x64/
+
+# 公开分发只保留音色配置，用户可导入自己的音频。
+# 大体积素材（bgms / fonts / videos / title-styles）不入库。
+!src/renderer/public/assets/
+src/renderer/public/assets/*
+!src/renderer/public/assets/voices/
+src/renderer/public/assets/voices/*
+!src/renderer/public/assets/voices/*.json
+!src/renderer/public/assets/voices/*.md

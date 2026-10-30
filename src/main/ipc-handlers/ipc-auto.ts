@@ -1,8 +1,9 @@
-import { ipcMain, app, Notification } from 'electron'
+import { ipcMain, app, Notification, BrowserWindow } from 'electron'
 import { chromium, BrowserContext, Page } from 'playwright'
 import fs from 'fs'
 import path from 'path'
 import { getUserDataPath } from '../local-server'
+import { getChromePath, prepareMacChromeForLaunch, validateMacChromeArch } from '../platform-paths'
 
 const PLATFORM_CONFIG = {
   bilibili: { homeUrl: 'https://www.bilibili.com' },
@@ -12,39 +13,279 @@ const PLATFORM_CONFIG = {
   redbook: { homeUrl: 'https://www.xiaohongshu.com' }
 }
 
-const platformContexts = new Map<string, BrowserContext>()
+/** 各平台创作者后台管理首页（非 C 端首页） */
+const PLATFORM_BACKEND_URLS: Record<string, string> = {
+  douyin: 'https://creator.douyin.com/creator-micro/home',
+  bilibili: 'https://member.bilibili.com/platform/home',
+  kuaishou: 'https://cp.kuaishou.com/profile',
+  wechat: 'https://channels.weixin.qq.com/platform/home',
+  redbook: 'https://creator.xiaohongshu.com/new/home',
+}
 
-function getChromePath(): string {
-  const baseDir = app.isPackaged
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'chrome')
-    : path.join(process.cwd(), 'chrome')
-  return path.join(baseDir, 'chrome.exe')
+const platformContexts = new Map<string, BrowserContext>()
+const loginWatchTimers = new Map<string, NodeJS.Timeout>()
+
+const PLATFORM_LABELS: Record<string, string> = {
+  douyin: '抖音',
+  bilibili: 'B站',
+  kuaishou: '快手',
+  wechat: '视频号',
+  redbook: '小红书',
+}
+
+function sanitizeProfileDirName(value: string): string {
+  return (String(value || '').trim() || 'default').replace(/[/\\:*?"<>|]/g, '_')
+}
+
+export function getPublishAccountProfileDir(accountId: string): string {
+  return getUserDataPath(`publish-browser-profiles/${sanitizeProfileDirName(accountId)}`)
+}
+
+function getLegacyPlatformProfileDir(platform: string): string {
+  return getUserDataPath(`browser-profiles/${platform}`)
+}
+
+function getCreatorUrl(platform: string): string {
+  return PLATFORM_BACKEND_URLS[platform] || ''
+}
+
+function getCreatorBackendUrl(platform: string): string {
+  return getCreatorUrl(platform)
+}
+
+function evaluatePlatformLogin(platform: string, url: string, content: string): boolean {
+  switch (platform) {
+    case 'douyin': {
+      const onCreator = url.includes('creator.douyin.com') || url.includes('douyin.com/creator')
+      if (!onCreator) return false
+      if (/login|passport|sso|\/auth/i.test(url)) return false
+      if (url.includes('/creator-micro/') || url.includes('/content/')) return true
+      const loggedInMarkers = ['新的创作', '数据总览', '创作服务平台', '抖音号', '发布视频', '高清发布', '互动管理']
+      const needsLogin = ['扫码登录', '请使用抖音', '立即登录', '请登录后'].some((m) => content.includes(m))
+      if (loggedInMarkers.some((m) => content.includes(m)) && !needsLogin) return true
+      return onCreator && !needsLogin && !content.includes('扫码登录')
+    }
+    case 'bilibili':
+      return !url.includes('passport.bilibili.com') && (url.includes('member.bilibili.com') || url.includes('space.bilibili.com') || !content.includes('登录'))
+    case 'kuaishou':
+      return !content.includes('请登录') && !url.includes('/login') && (url.includes('cp.kuaishou.com') || url.includes('creator.kuaishou.com'))
+    case 'wechat':
+      return !url.includes('login') && !content.includes('扫码登录') && url.includes('channels.weixin.qq.com/platform')
+    case 'redbook':
+      return url.includes('creator.xiaohongshu.com') && !url.includes('login') && !(content.includes('登录') && content.includes('扫码'))
+    default:
+      return !content.includes('请登录') && !content.includes('扫码登录')
+  }
+}
+
+async function checkPlatformLoginStatus(
+  page: Page,
+  platform: string,
+  options?: { soft?: boolean },
+): Promise<boolean> {
+  try {
+    const soft = options?.soft ?? false
+    let url = page.url()
+    let content = ''
+    try {
+      content = await page.content()
+    } catch {
+      content = ''
+    }
+
+    if (evaluatePlatformLogin(platform, url, content)) return true
+    if (soft) return false
+
+    const creatorUrl = getCreatorUrl(platform)
+    if (creatorUrl) {
+      const host = (() => {
+        try {
+          return new URL(creatorUrl).hostname
+        } catch {
+          return ''
+        }
+      })()
+      if (!host || !url.includes(host)) {
+        await page.goto(creatorUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      } else {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(async () => {
+          await page.goto(creatorUrl, { waitUntil: 'domcontentloaded', timeout: 60000 })
+        })
+      }
+      await page.waitForTimeout(2000)
+      url = page.url()
+      content = await page.content()
+    }
+    return evaluatePlatformLogin(platform, url, content)
+  } catch {
+    return false
+  }
+}
+
+function notifyPublishAccountStatus(payload: {
+  accountId: string
+  platform: string
+  is_valid: boolean
+  message?: string
+  current_url?: string
+}) {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('publish-account-status-changed', payload)
+    }
+  })
+}
+
+async function checkContextLoginStatus(
+  context: BrowserContext,
+  platform: string,
+  options?: { soft?: boolean },
+): Promise<{ isValid: boolean; page?: Page; url?: string }> {
+  const pages = context.pages().filter((p) => {
+    try {
+      return !p.isClosed()
+    } catch {
+      return false
+    }
+  })
+
+  for (const page of pages) {
+    if (await checkPlatformLoginStatus(page, platform, { soft: true })) {
+      return { isValid: true, page, url: page.url() }
+    }
+  }
+
+  if (options?.soft) return { isValid: false }
+
+  const page = pages.length > 0 ? pages[pages.length - 1] : await getOrCreateActivePage(context)
+  const isValid = await checkPlatformLoginStatus(page, platform, { soft: false })
+  return { isValid, page, url: page.url() }
+}
+
+function stopLoginWatch(userDataDir: string) {
+  const timer = loginWatchTimers.get(userDataDir)
+  if (timer) clearInterval(timer)
+  loginWatchTimers.delete(userDataDir)
+}
+
+function startLoginWatch(params: {
+  accountId: string
+  platform: string
+  userDataDir: string
+  context: BrowserContext
+}) {
+  stopLoginWatch(params.userDataDir)
+
+  const started = Date.now()
+  const timeoutMs = 10 * 60 * 1000
+
+  const timer = setInterval(async () => {
+    if (Date.now() - started > timeoutMs) {
+      stopLoginWatch(params.userDataDir)
+      return
+    }
+    try {
+      const { isValid, page, url } = await checkContextLoginStatus(params.context, params.platform, { soft: true })
+      if (!isValid) return
+
+      stopLoginWatch(params.userDataDir)
+      const message = '已登录'
+      notifyPublishAccountStatus({
+        accountId: params.accountId,
+        platform: params.platform,
+        is_valid: true,
+        message,
+        current_url: url || page?.url(),
+      })
+      try {
+        const label = PLATFORM_LABELS[params.platform] || params.platform
+        new Notification({
+          title: '账号登录成功',
+          body: `${label}账号已登录，软件状态已同步`,
+        }).show()
+      } catch {
+        /* ignore */
+      }
+    } catch (error) {
+      console.error('[login-watch] failed:', error)
+    }
+  }, 2000)
+
+  loginWatchTimers.set(params.userDataDir, timer)
+}
+
+async function tryNotifyIfAlreadyLoggedIn(params: {
+  accountId: string
+  platform: string
+  userDataDir: string
+  context: BrowserContext
+}) {
+  await new Promise((r) => setTimeout(r, 1500))
+  const { isValid, url, page } = await checkContextLoginStatus(params.context, params.platform, { soft: true })
+  if (!isValid) return
+  stopLoginWatch(params.userDataDir)
+  notifyPublishAccountStatus({
+    accountId: params.accountId,
+    platform: params.platform,
+    is_valid: true,
+    message: '已登录',
+    current_url: url || page?.url(),
+  })
 }
 
 async function getOrCreateActivePage(context: BrowserContext): Promise<Page> {
-  const pages = context.pages()
+  const pages = context.pages().filter((p) => {
+    try {
+      return !p.isClosed()
+    } catch {
+      return false
+    }
+  })
   if (pages.length === 0) return await context.newPage()
-  if (pages.length === 1 && pages[0]?.url() === 'about:blank') return pages[0]
-  return await context.newPage()
+
+  const nonBlank = pages.filter((p) => {
+    try {
+      return p.url() !== 'about:blank'
+    } catch {
+      return false
+    }
+  })
+  if (nonBlank.length > 0) return nonBlank[nonBlank.length - 1]
+  return pages[pages.length - 1]
 }
 
-async function getOrLaunchContext(platform: string): Promise<BrowserContext> {
-  const existing = platformContexts.get(platform)
+async function getOrLaunchContext(cacheKey: string, userDataDir: string): Promise<BrowserContext> {
+  const existing = platformContexts.get(cacheKey)
   if (existing) {
     try {
       const pages = existing.pages()
       if (pages.length > 0) return existing
+      await existing.close().catch(() => {})
     } catch {
-      platformContexts.delete(platform)
+      // ignore stale context
+    } finally {
+      platformContexts.delete(cacheKey)
     }
   }
 
   const chromePath = getChromePath()
   if (!fs.existsSync(chromePath)) {
-    throw new Error(`Chrome 未找到: ${chromePath}`)
+    const archHint = process.platform === 'darwin' ? ` (当前架构: ${process.arch})` : ''
+    throw new Error(
+      `Chrome 未找到: ${chromePath}${archHint}。请确认安装包包含 mac-${process.arch} 内置浏览器，或重新安装最新版。`
+    )
   }
 
-  const userDataDir = getUserDataPath(`browser-profiles/${platform}`)
+  prepareMacChromeForLaunch(chromePath)
+
+  const archCheck = validateMacChromeArch(chromePath)
+  if (!archCheck.ok) {
+    throw new Error(archCheck.message)
+  }
+
+  fs.mkdirSync(userDataDir, { recursive: true })
+  clearStaleProfileLocks(userDataDir)
+
   let context: BrowserContext
   try {
     context = await chromium.launchPersistentContext(userDataDir, {
@@ -61,29 +302,69 @@ async function getOrLaunchContext(platform: string): Promise<BrowserContext> {
     const rawMsg = launchError?.message || String(launchError)
     console.error('[ipc-auto] Chrome launch failed:', rawMsg)
 
-    // exitCode 3221225781 = 0xC0000135 = STATUS_DLL_NOT_FOUND
-    if (rawMsg.includes('3221225781') || rawMsg.includes('0xC0000135')) {
+    if (/already running|SingletonLock|profile.*in use|user data directory/i.test(rawMsg)) {
+      clearStaleProfileLocks(userDataDir, true)
+      try {
+        context = await chromium.launchPersistentContext(userDataDir, {
+          executablePath: chromePath,
+          headless: false,
+          viewport: null,
+          args: [
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-blink-features=AutomationControlled'
+          ]
+        })
+      } catch (retryError: any) {
+        throw new Error(`浏览器启动失败：${retryError?.message || rawMsg}`)
+      }
+    } else if (rawMsg.includes('3221225781') || rawMsg.includes('0xC0000135')) {
       throw new Error(
         '浏览器启动失败：系统缺少必要的运行库（DLL）。\n' +
         '请下载并安装 Visual C++ Redistributable（https://aka.ms/vs/17/release/vc_redist.x64.exe），安装后重启软件再试。'
       )
-    }
-    // exitCode 3221225477 = 0xC0000005 = ACCESS_VIOLATION
-    if (rawMsg.includes('3221225477') || rawMsg.includes('0xC0000005')) {
+    } else if (rawMsg.includes('3221225477') || rawMsg.includes('0xC0000005')) {
       throw new Error('浏览器启动失败：内存访问异常，请尝试重启软件或电脑后再试。')
+    } else if (rawMsg.includes('browser has been closed') || rawMsg.includes('Target page, context or browser')) {
+      throw new Error(
+        process.platform === 'darwin'
+          ? '浏览器启动失败：Chrome 进程异常退出。请用「右键 → 打开」启动软件后重试，或安装包含浏览器修复的最新版本。'
+          : '浏览器启动失败：进程异常退出。请确认系统已安装 Visual C++ Redistributable 运行库，或尝试重启软件。'
+      )
+    } else if (
+      process.platform === 'darwin' &&
+      /quarantine|SIGKILL|killed|Code Signature|damaged|cannot be opened|Library Validation|not permitted/i.test(rawMsg)
+    ) {
+      throw new Error(
+        '浏览器启动失败：macOS 安全策略拦截了内置浏览器。\n' +
+          '请用「右键 → 打开」启动主程序（不要双击），或在「系统设置 → 隐私与安全性」中允许运行后重试。'
+      )
+    } else {
+      const shortMsg = rawMsg.length > 200 ? rawMsg.substring(0, 200) + '...' : rawMsg
+      throw new Error(`浏览器启动失败：${shortMsg}`)
     }
-    // Generic browser closed / crashed
-    if (rawMsg.includes('browser has been closed') || rawMsg.includes('Target page, context or browser')) {
-      throw new Error('浏览器启动失败：进程异常退出。请确认系统已安装 Visual C++ Redistributable 运行库，或尝试重启软件。')
-    }
-    // Fallback: truncate Playwright's verbose message
-    const shortMsg = rawMsg.length > 200 ? rawMsg.substring(0, 200) + '...' : rawMsg
-    throw new Error(`浏览器启动失败：${shortMsg}`)
   }
 
-  context.on('close', () => platformContexts.delete(platform))
-  platformContexts.set(platform, context)
+  context.on('close', () => platformContexts.delete(cacheKey))
+  platformContexts.set(cacheKey, context)
   return context
+}
+
+function clearStaleProfileLocks(userDataDir: string, force = false): void {
+  for (const lockName of ['SingletonLock', 'lockfile']) {
+    const lockPath = path.join(userDataDir, lockName)
+    if (!fs.existsSync(lockPath)) continue
+    if (force) {
+      try { fs.unlinkSync(lockPath) } catch { /* ignore */ }
+      continue
+    }
+    try {
+      const stat = fs.lstatSync(lockPath)
+      if (stat.isSymbolicLink() || stat.isFile()) {
+        fs.unlinkSync(lockPath)
+      }
+    } catch { /* ignore */ }
+  }
 }
 
 export function registerAutoHandlers(): void {
@@ -92,7 +373,8 @@ export function registerAutoHandlers(): void {
       const config = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG]
       if (!config) return { success: false, error: '不支持的平台' }
 
-      const context = await getOrLaunchContext(platform)
+      const userDataDir = getLegacyPlatformProfileDir(platform)
+      const context = await getOrLaunchContext(`legacy:${platform}`, userDataDir)
       const page = await getOrCreateActivePage(context)
       await page.bringToFront()
       await page.goto(config.homeUrl, { waitUntil: 'domcontentloaded' })
@@ -125,8 +407,19 @@ export function registerAutoHandlers(): void {
       const config = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG]
       if (!config) return { success: false, message: '不支持的平台' }
 
-      let context = platformContexts.get(platform)
-      if (!context) context = await getOrLaunchContext(platform)
+      const userDataDir = params?.userDataDir || getLegacyPlatformProfileDir(platform)
+      const cacheKey = params?.userDataDir || `legacy:${platform}`
+      let context = platformContexts.get(cacheKey)
+      if (!context) context = await getOrLaunchContext(cacheKey, userDataDir)
+
+      if (params?.accountId) {
+        startLoginWatch({
+          accountId: params.accountId,
+          platform,
+          userDataDir,
+          context,
+        })
+      }
 
       const page = await getOrCreateActivePage(context)
       await page.bringToFront()
@@ -135,7 +428,8 @@ export function registerAutoHandlers(): void {
         videoPath: params.videoPath,
         title: params.title,
         description: params.description,
-        publishMode: params.publishMode ?? 'auto'
+        publishMode: params.publishMode ?? 'auto',
+        skipLoginWait: !!params?.userDataDir,
       }
 
       switch (platform) {
@@ -157,6 +451,140 @@ export function registerAutoHandlers(): void {
       return { success: false, message: error.message }
     }
   })
+
+  ipcMain.handle('browser-login-account', async (_, params: { platform: string; userDataDir?: string; accountId?: string }) => {
+    try {
+      const platform = params?.platform
+      let userDataDir = params?.userDataDir
+      if (!userDataDir && params?.accountId) {
+        userDataDir = getPublishAccountProfileDir(params.accountId)
+        fs.mkdirSync(userDataDir, { recursive: true })
+      }
+      const config = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG]
+      if (!config) return { success: false, error: '不支持的平台' }
+      if (!userDataDir) return { success: false, error: '缺少浏览器目录' }
+
+      const context = await getOrLaunchContext(userDataDir, userDataDir)
+      const page = await getOrCreateActivePage(context)
+      await page.bringToFront()
+      const url = getCreatorUrl(platform)
+      if (!url) return { success: false, error: '不支持的平台' }
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      if (params.accountId) {
+        startLoginWatch({
+          accountId: params.accountId,
+          platform,
+          userDataDir,
+          context,
+        })
+        void tryNotifyIfAlreadyLoggedIn({
+          accountId: params.accountId,
+          platform,
+          userDataDir,
+          context,
+        })
+      }
+      try {
+        new Notification({
+          title: '账号登录',
+          body: '请在打开的浏览器中扫码登录，完成后将自动同步到软件',
+        }).show()
+      } catch { /* ignore notification errors */ }
+      return { success: true, message: '浏览器已打开，扫码后将自动同步登录状态', userDataDir, watching: !!params.accountId }
+    } catch (error: any) {
+      console.error('[browser-login-account]', error)
+      return { success: false, error: error?.message || '打开登录失败' }
+    }
+  })
+
+  ipcMain.handle('browser-open-account', async (_, params: { platform: string; userDataDir?: string; accountId?: string }) => {
+    try {
+      const platform = params?.platform
+      let userDataDir = params?.userDataDir
+      if (!userDataDir && params?.accountId) {
+        userDataDir = getPublishAccountProfileDir(params.accountId)
+        fs.mkdirSync(userDataDir, { recursive: true })
+      }
+      const config = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG]
+      if (!config) return { success: false, error: '不支持的平台' }
+      if (!userDataDir) return { success: false, error: '缺少浏览器目录' }
+
+      const context = await getOrLaunchContext(userDataDir, userDataDir)
+      const page = await getOrCreateActivePage(context)
+      await page.bringToFront()
+      const url = getCreatorBackendUrl(platform)
+      if (!url) return { success: false, error: '不支持的平台' }
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+      const label = PLATFORM_LABELS[platform] || platform
+      return { success: true, message: `已打开${label}创作者后台`, userDataDir, url }
+    } catch (error: any) {
+      console.error('[browser-open-account]', error)
+      return { success: false, error: error?.message || '打开失败' }
+    }
+  })
+
+  ipcMain.handle('browser-check-account-status', async (_, params: { platform: string; userDataDir?: string; accountId?: string }) => {
+    try {
+      const platform = params?.platform
+      let userDataDir = params?.userDataDir
+      if (!userDataDir && params?.accountId) {
+        userDataDir = getPublishAccountProfileDir(params.accountId)
+        fs.mkdirSync(userDataDir, { recursive: true })
+      }
+      if (!PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG]) {
+        return { success: false, is_valid: false, message: '不支持的平台' }
+      }
+      if (!userDataDir) return { success: false, is_valid: false, message: '缺少浏览器目录' }
+
+      const context = await getOrLaunchContext(userDataDir, userDataDir)
+      let { isValid, page, url } = await checkContextLoginStatus(context, platform, { soft: true })
+      if (!isValid) {
+        const hard = await checkContextLoginStatus(context, platform, { soft: false })
+        isValid = hard.isValid
+        page = hard.page
+        url = hard.url
+      }
+      if (isValid && params?.accountId) {
+        stopLoginWatch(userDataDir)
+        notifyPublishAccountStatus({
+          accountId: params.accountId,
+          platform,
+          is_valid: true,
+          message: '已登录',
+          current_url: url || page?.url(),
+        })
+      }
+      return {
+        success: true,
+        is_valid: isValid,
+        message: isValid ? '已登录' : '待登录',
+        current_url: url || page?.url() || '',
+      }
+    } catch (error: any) {
+      return { success: false, is_valid: false, message: error.message }
+    }
+  })
+}
+
+// 等待视频上传完成的通用辅助函数
+async function waitForUploadComplete(page: Page, timeoutMs: number = 180000): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const progressEl = await page.locator('[class*="progress"], [class*="upload"]').first().textContent({ timeout: 2000 })
+      if (progressEl && (progressEl.includes('100%') || progressEl.includes('完成') || progressEl.includes('成功'))) {
+        await page.waitForTimeout(2000)
+        return
+      }
+    } catch {}
+    // 检查是否已经没有上传中的状态
+    const uploading = await page.locator('[class*="uploading"], [class*="progress-bar"]:not([style*="100"])').count()
+    if (uploading === 0) {
+      await page.waitForTimeout(3000)
+      return
+    }
+    await page.waitForTimeout(3000)
+  }
 }
 
 // Douyin helpers
@@ -227,7 +655,7 @@ async function fillDouyinPublishForm(page: Page, options: { title: string; descr
 }
 
 async function runDouyinPublishFlow(page: Page, options: any) {
-  const { videoPath = '', title = '', description = '' } = options
+  const { videoPath = '', title = '', description = '', publishMode = 'manual' } = options
 
   try {
     new Notification({ title: '抖音', body: '正在打开网站，请耐心等待' }).show()
@@ -266,6 +694,20 @@ async function runDouyinPublishFlow(page: Page, options: any) {
 
     await fillDouyinPublishForm(page, { title: title.trim(), description: description.trim(), uploaded })
 
+    if (publishMode === 'auto') {
+      await waitForUploadComplete(page, 180000)
+      const publishBtn = page.locator('button').filter({ hasText: /^发布$/ }).first()
+      try {
+        await publishBtn.click({ timeout: 10000 })
+        await page.waitForTimeout(3000)
+        new Notification({ title: '抖音', body: '已自动发布成功' }).show()
+        return { success: true, message: '已自动发布成功' }
+      } catch {
+        new Notification({ title: '抖音', body: '自动点击发布失败，请手动点击「发布」' }).show()
+        return { success: true, message: '自动点击发布失败，请手动点击「发布」' }
+      }
+    }
+
     new Notification({ title: '抖音', body: '表单已填写完成，请检查后手动点击「发布」' }).show()
     return { success: true, message: '表单已填写完成，请检查后手动点击「发布」' }
   } catch (error: any) {
@@ -290,7 +732,7 @@ async function waitForBilibiliLogin(page: Page, timeoutMs: number): Promise<bool
 }
 
 async function runBilibiliPublishFlow(page: Page, options: any) {
-  const { videoPath = '', title = '', description = '' } = options
+  const { videoPath = '', title = '', description = '', publishMode = 'manual' } = options
 
   try {
     new Notification({ title: '哔哩哔哩', body: '正在打开网站，请耐心等待' }).show()
@@ -339,6 +781,20 @@ async function runBilibiliPublishFlow(page: Page, options: any) {
       }
     }
 
+    if (publishMode === 'auto') {
+      await waitForUploadComplete(page, 180000)
+      const submitBtn = page.locator('button').filter({ hasText: /提交|发布/ }).first()
+      try {
+        await submitBtn.click({ timeout: 10000 })
+        await page.waitForTimeout(3000)
+        new Notification({ title: '哔哩哔哩', body: '已自动发布成功' }).show()
+        return { success: true, message: '已自动发布成功' }
+      } catch {
+        new Notification({ title: '哔哩哔哩', body: '自动点击发布失败，请手动点击「提交」' }).show()
+        return { success: true, message: '自动点击发布失败，请手动点击「提交」' }
+      }
+    }
+
     new Notification({ title: '哔哩哔哩', body: '表单已填写完成，请检查后手动点击「发布」' }).show()
     return { success: true, message: '表单已填写完成，请检查后手动点击「提交」' }
   } catch (error: any) {
@@ -374,7 +830,7 @@ async function waitForKuaishouLogin(page: Page, timeoutMs: number): Promise<bool
 }
 
 async function runKuaishouPublishFlow(page: Page, options: any) {
-  const { videoPath = '', title = '', description = '' } = options
+  const { videoPath = '', title = '', description = '', publishMode = 'manual' } = options
 
   try {
     new Notification({ title: '快手', body: '正在打开网站，请耐心等待' }).show()
@@ -418,6 +874,20 @@ async function runKuaishouPublishFlow(page: Page, options: any) {
       } catch {}
     }
 
+    if (publishMode === 'auto') {
+      await waitForUploadComplete(page, 180000)
+      const publishBtn = page.locator('button').filter({ hasText: /发布/ }).first()
+      try {
+        await publishBtn.click({ timeout: 10000 })
+        await page.waitForTimeout(3000)
+        new Notification({ title: '快手', body: '已自动发布成功' }).show()
+        return { success: true, message: '已自动发布成功' }
+      } catch {
+        new Notification({ title: '快手', body: '自动点击发布失败，请手动点击「发布」' }).show()
+        return { success: true, message: '自动点击发布失败，请手动点击「发布」' }
+      }
+    }
+
     new Notification({ title: '快手', body: '表单已填写完成，请检查后手动点击「发布」' }).show()
     return { success: true, message: '表单已填写完成，请检查后手动点击「发布」' }
   } catch (error: any) {
@@ -454,7 +924,7 @@ async function waitForWechatLogin(page: Page, timeoutMs: number): Promise<boolea
 }
 
 async function runWechatPublishFlow(page: Page, options: any) {
-  const { videoPath = '', title = '', description = '' } = options
+  const { videoPath = '', title = '', description = '', publishMode = 'manual' } = options
 
   try {
     new Notification({ title: '视频号', body: '正在打开网站，请耐心等待' }).show()
@@ -496,6 +966,20 @@ async function runWechatPublishFlow(page: Page, options: any) {
       } catch {}
     }
 
+    if (publishMode === 'auto') {
+      await waitForUploadComplete(page, 180000)
+      const publishBtn = page.locator('button').filter({ hasText: /发表/ }).first()
+      try {
+        await publishBtn.click({ timeout: 10000 })
+        await page.waitForTimeout(3000)
+        new Notification({ title: '视频号', body: '已自动发布成功' }).show()
+        return { success: true, message: '已自动发布成功' }
+      } catch {
+        new Notification({ title: '视频号', body: '自动点击发布失败，请手动点击「发表」' }).show()
+        return { success: true, message: '自动点击发布失败，请手动点击「发表」' }
+      }
+    }
+
     new Notification({ title: '视频号', body: '表单已填写完成，请检查后手动点击「发布」' }).show()
     return { success: true, message: '表单已填写完成，请检查后手动点击「发布」' }
   } catch (error: any) {
@@ -528,7 +1012,7 @@ async function waitForRedbookLogin(page: Page, timeoutMs: number): Promise<boole
 }
 
 async function runRedbookPublishFlow(page: Page, options: any) {
-  const { videoPath = '', title = '', description = '' } = options
+  const { videoPath = '', title = '', description = '', publishMode = 'manual' } = options
 
   try {
     new Notification({ title: '小红书', body: '正在打开网站，请耐心等待' }).show()
@@ -573,6 +1057,20 @@ async function runRedbookPublishFlow(page: Page, options: any) {
           await page.waitForTimeout(300)
         }
       } catch {}
+    }
+
+    if (publishMode === 'auto') {
+      await waitForUploadComplete(page, 180000)
+      const publishBtn = page.locator('button').filter({ hasText: /发布/ }).first()
+      try {
+        await publishBtn.click({ timeout: 10000 })
+        await page.waitForTimeout(3000)
+        new Notification({ title: '小红书', body: '已自动发布成功' }).show()
+        return { success: true, message: '已自动发布成功' }
+      } catch {
+        new Notification({ title: '小红书', body: '自动点击发布失败，请手动点击「发布」' }).show()
+        return { success: true, message: '自动点击发布失败，请手动点击「发布」' }
+      }
     }
 
     new Notification({ title: '小红书', body: '表单已填写完成，请检查后手动点击「发布」' }).show()

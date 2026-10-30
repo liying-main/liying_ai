@@ -78,6 +78,17 @@ if "%HAS_ARGS%"=="0" (
 )
 
 :start_build
+:: Step 0: Verify bundled FFmpeg before compiling or packaging
+echo  [0/3] 检查 Windows FFmpeg 资源...
+call node scripts\verify-packaging-resources.mjs win32
+if %errorlevel% neq 0 (
+    echo.
+    echo  [错误] FFmpeg 资源不完整，已停止打包。请先运行 init.bat。
+    exit /b 1
+)
+echo  [OK] FFmpeg 资源完整
+echo.
+
 :: 显示打包计划
 echo.
 echo  ── 打包计划 ──────────────────────────────
@@ -171,10 +182,10 @@ echo  [3/%BUILD_COUNT%] 打包 Windows %ARCH_NAME% (%ARCH%)...
 echo  ─────────────────────────────────────
 
 :: 运行 electron-builder
-call npx electron-builder --win --arch=%ARCH%
+call npx electron-builder --win --%ARCH%
 
 if %errorlevel% neq 0 (
-    echo  [失败] %ARCH_NAME% (%ARCH%) 打包失败！
+    echo  [失败] %ARCH_NAME% ^(%ARCH%^) 打包失败！
     set /a BUILD_FAILED+=1
     echo.
     goto :eof
