@@ -220,7 +220,8 @@ interface ElectronAPI {
 
   // Download operations
   downloadDouyinVideo: (videoUrl: string) => Promise<DownloadResult>
-  downloadDouyinUserPosts: (profileUrl: string) => Promise<DouyinPostsResult>
+  downloadDouyinUserPosts: (profileUrl: string, requestId?: string) => Promise<DouyinPostsResult>
+  cancelDouyinUserPosts: (requestId: string) => Promise<boolean>
   downloadAudioFromUrl: (audioUrl: string, options?: DownloadAudioOptions) => Promise<DownloadResult>
   uploadVoiceAndTranscribe: (filePath: string, fileName: string) => Promise<TranscribeResult>
 

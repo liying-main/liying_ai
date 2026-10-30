@@ -12,6 +12,7 @@ files:
   - '!.build-meta.json'
   - '!scripts/**/*'
   - '!docs/**/*'
+  - '!tests/**/*'
   - '!channels/**/*'
   - '!*.bat'
   - '!*.sh'

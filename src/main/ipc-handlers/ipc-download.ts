@@ -1,6 +1,5 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
 import { spawn, exec } from 'child_process'
-import { createHash } from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import https from 'https'
@@ -9,16 +8,12 @@ import iconv from 'iconv-lite'
 import { getUserDataPath } from '../local-server'
 import { API_BASE_URL } from '../api-config'
 import { needTokenFromMain } from './ipc-plugin-proxy'
-import { getFfmpegPath, getDouyinExePath, resolveDouyinExePath, DOUYIN_DOWNLOADER_MISSING_MESSAGE } from '../platform-paths'
+import { getFfmpegPath, getDouyinExePath, resolveDouyinExePath } from '../platform-paths'
 import { downloadDouyinVideoWithBrowser } from '../douyin-browser-downloader'
-import {
-  extractUrlFromText,
-  isDouyinProfileUrl,
-  buildDouyinProfileUrl,
-  extractSecUidFromInfoResult,
-  formatDouyinUserPostsError,
-  normalizeDouyinUrlForDownloader,
-} from '../douyin-url-helpers'
+import { downloadDouyinUserPostsWithBrowser } from '../douyin-browser-posts'
+import { isDouyinBrowserAvailable } from '../douyin-browser-session'
+import { validateDouyinUrl } from '../douyin-post-parser'
+import { normalizeDouyinUrlForDownloader } from '../douyin-url-helpers'
 
 // API Configuration
 const NONCE_INFO_KEY = 'douyin_cookies_info'
@@ -199,113 +194,6 @@ function shouldUseDouyinBrowserFallback(run: {
   return /(?:HTTP\s*[^\d\r\n]{0,32})?403\b|forbidden|failed to get cookies|无法启动浏览器|(?:chrome|edge).*驱动.*(?:不存在|缺失)/i.test(text)
 }
 
-function stripUnsupportedText(text: unknown): string {
-  if (typeof text !== 'string') return ''
-  return text
-    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '')
-    .replace(/\uFEFF/g, '')
-    .trim()
-}
-
-function sanitizeDouyinPosts(posts: any[]): any[] {
-  if (!Array.isArray(posts)) return []
-  return posts.map((post) => {
-    if (!post || typeof post !== 'object') return post
-    const desc = stripUnsupportedText(
-      post.desc || post.description || post.title || post.text || post.caption || post.content || ''
-    )
-    return {
-      ...post,
-      desc,
-      title: stripUnsupportedText(post.title || desc),
-      description: stripUnsupportedText(post.description || desc),
-    }
-  })
-}
-
-function getUserPostsDownloadDir(profileUrl: string): string {
-  const dirKey = createHash('sha256').update(profileUrl.trim().toLowerCase()).digest('hex').slice(0, 16)
-  return getUserDataPath(`temp/user_posts/${dirKey}`)
-}
-
-function loadPostsFromJsonFile(filePath: string): any[] | null {
-  try {
-    if (!fs.existsSync(filePath)) return null
-    const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
-    const posts = Array.isArray(fileData)
-      ? fileData
-      : (fileData.posts || fileData.aweme_list || null)
-    if (!Array.isArray(posts) || posts.length === 0) return null
-    return sanitizeDouyinPosts(posts)
-  } catch (error) {
-    console.warn('[download-douyin] failed to read posts file:', filePath, error)
-    return null
-  }
-}
-
-function loadRecentPostsFromDownloadDir(downloadDir: string): any[] | null {
-  try {
-    if (!fs.existsSync(downloadDir)) return null
-    const jsonFiles = fs.readdirSync(downloadDir)
-      .filter((name) => name.toLowerCase().endsWith('.json'))
-      .map((name) => ({
-        filePath: path.join(downloadDir, name),
-        mtimeMs: fs.statSync(path.join(downloadDir, name)).mtimeMs,
-      }))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-
-    for (const file of jsonFiles) {
-      if (Date.now() - file.mtimeMs > 5 * 60 * 1000) continue
-      const posts = loadPostsFromJsonFile(file.filePath)
-      if (posts) return posts
-    }
-  } catch (error) {
-    console.warn('[download-douyin] failed to scan posts dir:', error)
-  }
-  return null
-}
-
-function resolveDouyinUserPostsResult(
-  finalResult: any,
-  stdout: string,
-  stderr: string,
-  downloadDir: string,
-  inputUrl?: string
-): { success: boolean; posts?: any[]; message?: string; error?: string } {
-  if (finalResult?.status === 'success' && Array.isArray(finalResult.posts)) {
-    return { success: true, posts: sanitizeDouyinPosts(finalResult.posts) }
-  }
-
-  if (finalResult?.status === 'success' && finalResult.file_path) {
-    const postsFilePath = resolveDownloadedFilePath(finalResult.file_path, downloadDir)
-    const posts = postsFilePath ? loadPostsFromJsonFile(postsFilePath) : null
-    if (posts) return { success: true, posts }
-  }
-
-  const fallbackPosts = loadRecentPostsFromDownloadDir(downloadDir)
-  if (fallbackPosts) {
-    console.warn('[download-douyin] recovered posts from download dir after stdout failure')
-    return { success: true, posts: fallbackPosts }
-  }
-
-  if (finalResult?.status === 'error') {
-    const rawMessage = finalResult.message || '获取用户作品失败'
-    return {
-      success: false,
-      message: inputUrl ? formatDouyinUserPostsError(rawMessage, inputUrl) : rawMessage,
-      error: stderr || stdout,
-    }
-  }
-
-  return {
-    success: false,
-    message: inputUrl
-      ? formatDouyinUserPostsError('无法解析结果', inputUrl)
-      : '无法解析结果',
-    error: stderr || stdout,
-  }
-}
-
 async function ensureDouyinCookiesFile(cookiesPath: string): Promise<void> {
   let token: string | null = null
   try {
@@ -421,7 +309,7 @@ async function resolveDouyinShareRedirectUrl(inputUrl: string): Promise<string |
         headers,
         signal: controller.signal,
       })
-      const finalUrl = response.url ? normalizeDouyinUrlForDownloader(response.url) : ''
+      const finalUrl = response.url ? normalizeDouyinUrlForDownloader(validateDouyinUrl(response.url)) : ''
       if (finalUrl && finalUrl !== inputUrl) return finalUrl
     } catch (error) {
       console.warn(`[download-douyin] failed to resolve share redirect with ${method}:`, error)
@@ -432,63 +320,15 @@ async function resolveDouyinShareRedirectUrl(inputUrl: string): Promise<string |
   return null
 }
 
-async function resolveDouyinProfileUrl(
-  inputUrl: string,
-  exePath: string,
-  cookiesPath: string,
-  workDir: string
-): Promise<
-  | { ok: true; profileUrl: string; resolvedFrom: 'direct' | 'share' | 'video' }
-  | { ok: false; message: string }
-> {
-  let url = normalizeDouyinUrlForDownloader(inputUrl)
-  if (!url) {
-    return { ok: false, message: '主页链接不能为空' }
-  }
-
-  const redirectedUrl = await resolveDouyinShareRedirectUrl(url)
-  if (redirectedUrl) {
-    console.log('[download-douyin] resolved share redirect:', redirectedUrl)
-    url = redirectedUrl
-  }
-
-  if (isDouyinProfileUrl(url)) {
-    return { ok: true, profileUrl: url, resolvedFrom: redirectedUrl ? 'share' : 'direct' }
-  }
-
-  const infoDir = path.join(workDir, '_profile_resolve')
-  if (!fs.existsSync(infoDir)) {
-    fs.mkdirSync(infoDir, { recursive: true })
-  }
-
-  console.log('[download-douyin] resolving profile from video/short link:', url)
-  const infoArgs = [url, '-c', cookiesPath, '-d', infoDir, '-m', 'info']
-  try {
-    const infoRun = await runDouyinDownloader(exePath, infoArgs, 'posts', 120000)
-    if (infoRun.result?.status === 'success') {
-      const secUid = extractSecUidFromInfoResult(infoRun.result)
-      if (secUid) {
-        const profileUrl = buildDouyinProfileUrl(secUid)
-        console.log('[download-douyin] resolved profile url:', profileUrl)
-        return { ok: true, profileUrl, resolvedFrom: 'video' }
-      }
-    }
-    const rawMessage =
-      infoRun.result?.message || infoRun.stderr || infoRun.stdout || '无法从链接识别博主主页'
-    return { ok: false, message: formatDouyinUserPostsError(rawMessage, url) }
-  } catch (error: any) {
-    const rawMessage = error instanceof Error ? error.message : String(error)
-    return { ok: false, message: formatDouyinUserPostsError(rawMessage, url) }
-  }
-}
-
 export function registerDownloadHandlers(): void {
-  // 特性检测：抖音下载器在当前平台是否可用 (Mac arm64/x64 需要二进制存在)
-  // 前端可据此隐藏抖音下载入口，避免点了报错
+  // 开源浏览器实现为默认能力；旧下载器仅作为单视频的兼容路径。
   ipcMain.handle('douyin-downloader-available', async () => {
     const { exePath } = resolveDouyinExePath()
+    const browserAvailable = isDouyinBrowserAvailable()
     return {
-      available: Boolean(exePath),
+      available: Boolean(exePath) || browserAvailable,
+      browserAvailable,
+      legacyAvailable: Boolean(exePath),
       platform: process.platform,
       arch: process.arch,
       expectedPath: exePath || getDouyinExePath()
@@ -758,32 +598,27 @@ export function registerDownloadHandlers(): void {
 
   ipcMain.handle('download-douyin-video', async (_event, videoUrl: string, options?: any) => {
     try {
-      const { exePath, searched } = resolveDouyinExePath()
-      if (!exePath) {
+      // Validate before normalization: a foreign /user/ URL must never become a
+      // trusted Douyin URL. The browser resolves share links through normal navigation.
+      let url = validateDouyinUrl(videoUrl)
+      const { exePath } = resolveDouyinExePath()
+      const downloadDir = options?.downloadDir?.trim() || getUserDataPath('videos/downloaded')
+      if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true })
+      const downloadWithBrowser = async () => {
+        const result = await downloadDouyinVideoWithBrowser(url, downloadDir)
         return {
-          success: false,
-          message: DOUYIN_DOWNLOADER_MISSING_MESSAGE,
-          error: `File not found. Searched: ${searched.join('; ')}`
+          success: true, message: '视频下载成功', file_path: result.filePath,
+          video_id: result.videoId, platform: 'douyin', with_watermark: false,
+          browser_fallback: true, size: result.size, duration: result.duration,
         }
       }
+      if (!exePath) return await downloadWithBrowser()
 
       const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
-      const downloadDir = options?.downloadDir?.trim() || getUserDataPath('videos/downloaded')
       await ensureDouyinCookiesFile(cookiesPath)
-
-      let url = normalizeDouyinUrlForDownloader(videoUrl)
-      if (!url) {
-        return { success: false, message: '请粘贴有效的抖音视频链接', error: 'empty url' }
-      }
+      url = normalizeDouyinUrlForDownloader(url)
       const redirectedUrl = await resolveDouyinShareRedirectUrl(url)
-      if (redirectedUrl) {
-        console.log('[download-douyin] resolved share redirect:', redirectedUrl)
-        url = redirectedUrl
-      }
-
-      if (!fs.existsSync(downloadDir)) {
-        fs.mkdirSync(downloadDir, { recursive: true })
-      }
+      if (redirectedUrl) url = validateDouyinUrl(redirectedUrl)
 
       const spawnArgs = [url, '-c', cookiesPath, '-d', downloadDir]
       console.log('Executing download command:', exePath, ...spawnArgs)
@@ -798,32 +633,8 @@ export function registerDownloadHandlers(): void {
       })
 
       if (shouldUseDouyinBrowserFallback(run)) {
-        console.warn('[download-douyin] legacy downloader returned 403; using browser fallback')
-        try {
-          const fallback = await downloadDouyinVideoWithBrowser(url, downloadDir)
-          return {
-            success: true,
-            message: '视频下载成功',
-            file_path: fallback.filePath,
-            video_id: fallback.videoId,
-            platform: 'douyin',
-            with_watermark: false,
-            browser_fallback: true,
-            size: fallback.size,
-            duration: fallback.duration,
-          }
-        } catch (fallbackError) {
-          const fallbackMessage = fallbackError instanceof Error
-            ? fallbackError.message
-            : String(fallbackError)
-          console.error('[download-douyin] browser fallback failed:', fallbackMessage)
-          return {
-            success: false,
-            message: `抖音接口返回 HTTP 403，浏览器下载失败：${fallbackMessage}`,
-            error: fallbackMessage,
-            code: run.code,
-          }
-        }
+        console.warn('[download-douyin] legacy downloader unavailable; using browser fallback')
+        return await downloadWithBrowser()
       }
 
       if (run.code !== 0 && run.code !== null && !finalResult) {
@@ -897,85 +708,37 @@ export function registerDownloadHandlers(): void {
     }
   })
 
-  ipcMain.handle('download-douyin-user-posts', async (event, profileUrl: string, options?: any) => {
+  const profileRequests = new Map<string, AbortController>()
+  ipcMain.handle('cancel-douyin-user-posts', (event, requestId: string) => {
+    if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(requestId)) return false
+    const controller = profileRequests.get(`${event.sender.id}:${requestId}`)
+    controller?.abort()
+    return Boolean(controller)
+  })
+  ipcMain.handle('download-douyin-user-posts', async (event, profileUrl: string, requestId?: string) => {
+    if (requestId !== undefined && (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(requestId))) {
+      return { success: false, message: '无效的采集任务标识', posts: [] }
+    }
+    const controller = new AbortController()
+    const key = requestId ? `${event.sender.id}:${requestId}` : undefined
+    if (key) {
+      profileRequests.get(key)?.abort()
+      profileRequests.set(key, controller)
+    }
+    const onDestroyed = (): void => controller.abort()
+    event.sender.once('destroyed', onDestroyed)
     try {
-      const normalizedProfileUrl = normalizeDouyinUrlForDownloader(profileUrl)
-      const { exePath, searched } = resolveDouyinExePath()
-      if (!exePath) {
-        return {
-          success: false,
-          message: DOUYIN_DOWNLOADER_MISSING_MESSAGE,
-          error: `File not found. Searched: ${searched.join('; ')}`,
-          posts: [],
-        }
-      }
-
-      const cookiesPath = options?.cookiesPath?.trim() || path.join(getUserDataPath(), 'nonce.txt')
-      await ensureDouyinCookiesFile(cookiesPath)
-
-      const resolveWorkDir = getUserDataPath('temp/profile-resolve')
-      if (!fs.existsSync(resolveWorkDir)) {
-        fs.mkdirSync(resolveWorkDir, { recursive: true })
-      }
-
-      const profileResolve = await resolveDouyinProfileUrl(
-        normalizedProfileUrl || profileUrl,
-        exePath,
-        cookiesPath,
-        resolveWorkDir
-      )
-      if (!profileResolve.ok) {
-        return {
-          success: false,
-          message: profileResolve.message,
-          error: profileResolve.message,
-          posts: [],
-        }
-      }
-
-      const effectiveProfileUrl = profileResolve.profileUrl
-      const downloadDir =
-        options?.downloadDir?.trim() || getUserPostsDownloadDir(effectiveProfileUrl)
-      if (!fs.existsSync(downloadDir)) {
-        fs.mkdirSync(downloadDir, { recursive: true })
-      }
-
-      const spawnArgs = [effectiveProfileUrl, '-c', cookiesPath, '-d', downloadDir, '-m', 'user']
-      console.log('[download-douyin] user posts command:', exePath, ...spawnArgs)
-
-      const run = await runDouyinDownloader(exePath, spawnArgs, 'posts')
-      console.log('[download-douyin] user posts finished, stdout:', run.stdout)
-      if (run.stderr) console.log('[download-douyin] user posts stderr:', run.stderr)
-
-      const resolvedPosts = resolveDouyinUserPostsResult(
-        run.result,
-        run.stdout,
-        run.stderr,
-        downloadDir,
-        profileUrl
-      )
-
-      return {
-        ...resolvedPosts,
-        posts: resolvedPosts.posts || [],
-        resolvedProfileUrl:
-          profileResolve.resolvedFrom === 'video' || profileResolve.resolvedFrom === 'share'
-            ? effectiveProfileUrl
-            : undefined,
-        resolvedFrom: profileResolve.resolvedFrom,
-      }
-    } catch (error: any) {
-      console.error('Download user posts failed:', error)
-      const message = formatDouyinUserPostsError(
-        error instanceof Error ? error.message : String(error),
-        profileUrl
-      )
-      return {
-        success: false,
-        message,
-        error: message,
-        posts: [],
-      }
+      const result = await downloadDouyinUserPostsWithBrowser(profileUrl, controller.signal)
+      controller.signal.throwIfAborted()
+      return { success: true, ...result }
+    } catch (error) {
+      if (controller.signal.aborted) return { success: false, cancelled: true, message: '本次选题采集已取消', posts: [] }
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('Read Douyin user posts failed:', message)
+      return { success: false, message, error: message, posts: [] }
+    } finally {
+      event.sender.off('destroyed', onDestroyed)
+      if (key && profileRequests.get(key) === controller) profileRequests.delete(key)
     }
   })
 

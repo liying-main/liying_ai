@@ -40,3 +40,7 @@ src/renderer/public/assets/*
 src/renderer/public/assets/voices/*
 !src/renderer/public/assets/voices/*.json
 !src/renderer/public/assets/voices/*.md
+
+# Python source-archive tooling cache
+__pycache__/
+*.py[cod]

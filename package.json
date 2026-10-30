@@ -1,7 +1,7 @@
 {
   "name": "liying-digitalhuman",
   "productName": "厉影AI 数字人",
-  "version": "3.2.7",
+  "version": "3.2.8",
   "description": "厉影AI 数字人 - 免费开源客户端",
   "main": "./out/main/index.js",
   "author": "厉影AI",

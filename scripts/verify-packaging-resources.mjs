@@ -1,52 +1,24 @@
-import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import resources from '../build/required-resources.cjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const platform = process.argv[2] || process.platform
 const rootDir = path.resolve(process.argv[3] || repoRoot)
 
-function requiredFilesFor(platformName) {
-  if (platformName === 'win32' || platformName === 'win') {
-    return ['ffmpeg.exe', 'ffprobe.exe']
+try {
+  const required = resources.verifyResources(rootDir, platform)
+  if (process.platform === 'win32' && ['win', 'win32'].includes(platform)) {
+    for (const tool of ['ffmpeg.exe', 'ffprobe.exe']) {
+      const run = spawnSync(path.join(rootDir, 'ffmpeg', 'bin', tool), ['-version'], { timeout: 15000, windowsHide: true, encoding: 'utf8' })
+      if (run.error || run.status !== 0) throw new Error(`${tool} cannot run; check its DLLs and architecture: ${run.error?.message || run.status}`)
+    }
   }
-  if (platformName === 'darwin' || platformName === 'mac') {
-    const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
-    return [`ffmpeg-${arch}`, `ffprobe-${arch}`]
-  }
-  return []
+  console.log(`[resource-check] FFmpeg and browser resources OK (${required.length} files)`)
+} catch (error) {
+  console.error(`[resource-check] ${error.message}`)
+  console.error('[resource-check] 请按 README 准备完整 Chromium 和 FFmpeg / FFprobe，不能只复制一个 EXE。')
+  process.exitCode = 1
 }
-
-const requiredFiles = requiredFilesFor(platform)
-if (requiredFiles.length === 0) {
-  console.log(`[resource-check] No FFmpeg filename rules for platform: ${platform}`)
-  process.exit(0)
-}
-
-const binDir = path.join(rootDir, 'ffmpeg', 'bin')
-const missing = []
-const invalid = []
-
-for (const fileName of requiredFiles) {
-  const filePath = path.join(binDir, fileName)
-  if (!fs.existsSync(filePath)) {
-    missing.push(fileName)
-    continue
-  }
-
-  const stat = fs.statSync(filePath)
-  if (!stat.isFile() || stat.size < 64 * 1024) {
-    invalid.push(`${fileName} (${stat.isFile() ? `${stat.size} bytes` : 'not a file'})`)
-  }
-}
-
-if (missing.length > 0 || invalid.length > 0) {
-  console.error(`[resource-check] FFmpeg resources are incomplete in: ${binDir}`)
-  if (missing.length > 0) console.error(`  Missing: ${missing.join(', ')}`)
-  if (invalid.length > 0) console.error(`  Invalid: ${invalid.join(', ')}`)
-  console.error('[resource-check] 请将有再分发许可的 FFmpeg / FFprobe 放入 ffmpeg/bin；参见 README 的打包资源说明。')
-  process.exit(1)
-}
-
-console.log(`[resource-check] FFmpeg resources OK: ${requiredFiles.join(', ')}`)

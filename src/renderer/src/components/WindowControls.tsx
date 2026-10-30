@@ -13,16 +13,16 @@ export function WindowControls() {
   }
 
   async function handleMinimize() {
-    await window.api?.windowMinimize()
+    await window.api?.minimizeWindow()
   }
 
   async function handleMaximize() {
-    await window.api?.windowMaximize()
+    await window.api?.maximizeWindow()
     checkMaximized()
   }
 
   async function handleClose() {
-    await window.api?.windowClose()
+    await window.api?.closeWindow()
   }
 
   return (

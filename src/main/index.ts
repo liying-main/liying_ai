@@ -6,7 +6,7 @@ import { registerAllIpcHandlers } from './ipc-handlers'
 import { registerUpdaterHandlers } from './ipc-handlers/ipc-updater'
 import { setMainWindowForPluginToken, abandonClientPluginQueues } from './ipc-handlers/ipc-plugin-proxy'
 import { CHANNEL } from '../shared/channel.generated'
-import { getWindowIconRelativePath, ensureDouyinDownloader } from './platform-paths'
+import { getWindowIconRelativePath } from './platform-paths'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -144,7 +144,6 @@ if (!gotTheLock) {
 
     // Start local file server for video playback
     startLocalFileServer()
-    ensureDouyinDownloader()
     
     // Register all IPC handlers
     registerAllIpcHandlers()

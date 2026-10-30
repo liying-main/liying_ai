@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [release/v3.2.8]
-    paths: [.github/workflows/archive-ffmpeg-sources.yml]
+    paths: [.github/workflows/archive-ffmpeg-sources.yml, scripts/collect-rav1e-sources.py]
 
 permissions:
   contents: write
@@ -78,6 +78,15 @@ jobs:
           (root / 'SHA256SUMS.sources.txt').write_text(''.join(digest(p) + '  ' + p.name + '\n' for p in sorted(root.iterdir()) if p.is_file()))
           print(json.dumps({'verified_cache_bytes': cache.stat().st_size, 'entries': entries, 'parts': parts}, indent=2))
           PY
+      - name: Supplement exact rav1e Rust sources and verify offline resolution
+        shell: bash
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' "repos/$GH_REPO/contents/scripts/collect-rav1e-sources.py?ref=$GITHUB_SHA" > "$RUNNER_TEMP/collect-rav1e-sources.py"
+          python3 "$RUNNER_TEMP/collect-rav1e-sources.py" --output rav1e-supplement
+          cp rav1e-supplement/rav1e-rust-sources-run-40871264069.zip source-assets/
+          cp rav1e-supplement/rav1e-source-supplement-manifest.json source-assets/
+          cd source-assets
+          sha256sum rav1e-rust-sources-run-40871264069.zip rav1e-source-supplement-manifest.json >> SHA256SUMS.sources.txt
       - name: Attach archived source materials to draft release
         shell: bash
         run: gh release upload v3.2.8 source-assets/* --repo "$GH_REPO" --clobber

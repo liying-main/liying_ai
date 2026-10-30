@@ -13,24 +13,19 @@
       "sha256": "d24a9fb340641562384bb0c48dca0f54c012f2c5561a945896fc583d4b62802e"
     },
     {
+      "path": ".github/workflows/archive-ffmpeg-sources.yml",
+      "bytes": 5166,
+      "sha256": "10b2b9ec8675490da74765558374f06db894d7a0a4595e427c49cf359e8134d4"
+    },
+    {
       "path": ".gitignore",
-      "bytes": 949,
-      "sha256": "812b44b114641745d68fb523645f8bd0139cce630aa0e27bd8ee14d10f0de6e6"
+      "bytes": 1022,
+      "sha256": "c8ac515adb861c6f5df1c5b0fe892cc409bbe509a8d756c335a316ed0fcfcdd6"
     },
     {
       "path": ".npmrc",
       "bytes": 148,
       "sha256": "2aa4557c28b1451577ff88ce00648b5cbac3520ad3765e19a5f63ed2a465528f"
-    },
-    {
-      "path": "build/afterPack.cjs",
-      "bytes": 8796,
-      "sha256": "3ee286287f64fc2071ebb154a76e21f302bbf562c6c32e41d6ea4b099ae8ca09"
-    },
-    {
-      "path": "build/icon.ico",
-      "bytes": 372526,
-      "sha256": "4356e777efbde6105be8b014046a6d4fdc347b78c8c2030b785cf1ebee368429"
     },
     {
       "path": "build.bat",
@@ -43,9 +38,24 @@
       "sha256": "fc9cd0c155bcc69c57403ce9e9b83f5a8bcf39ab525521302afaff5030e47465"
     },
     {
+      "path": "build/afterPack.cjs",
+      "bytes": 6968,
+      "sha256": "9480ea832cc23d464e8337d6d989136e3cf91b3d0d964182bcdf08c9c53fd550"
+    },
+    {
+      "path": "build/icon.ico",
+      "bytes": 372526,
+      "sha256": "4356e777efbde6105be8b014046a6d4fdc347b78c8c2030b785cf1ebee368429"
+    },
+    {
+      "path": "build/required-resources.cjs",
+      "bytes": 1821,
+      "sha256": "1d56efa059aa4b5dc4a6ffe8b3c71dcfed4e2e35d15a79b8271aa7f0d63db516"
+    },
+    {
       "path": "CHANGELOG.md",
-      "bytes": 17140,
-      "sha256": "78c0e6a956e19a20eb873101783e09e3bc46246ed29f3386f27e53ed87ca1a98"
+      "bytes": 17870,
+      "sha256": "f5928854641ab34aef4a507e44e4874bf086ae87cbdea2a6300df4b02751276f"
     },
     {
       "path": "channels/default/app.png",
@@ -74,13 +84,13 @@
     },
     {
       "path": "electron-builder.generated.yml",
-      "bytes": 2374,
-      "sha256": "b798c68cc6a361c200519aea9cb588c2e7f676f7cb5d8032bee0b4e611e6fd67"
+      "bytes": 2392,
+      "sha256": "86762b49483048ae8dc04b575f59d179455e7141c14c8545bedf0ffedc4e4264"
     },
     {
       "path": "electron-builder.yml",
-      "bytes": 2355,
-      "sha256": "fa566533b023df3f8dbb8b80ba9467f9a4eb78163d73e043a26bab3a5ac4976c"
+      "bytes": 2374,
+      "sha256": "9bbb3964151c6564a55a5085f1f1f9d18423e584c2e465b9fd098d974a1fb38b"
     },
     {
       "path": "electron.vite.config.ts",
@@ -100,7 +110,7 @@
     {
       "path": "package.json",
       "bytes": 1789,
-      "sha256": "e7a48f8ea937184ace3a08e2c6fe92c968e7e7cccec9b2d481d60db39b8003a9"
+      "sha256": "234dba67c953bcc2d3949aa085c8a66f49c32e64fa1e4a6b8e858e13be04bee7"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -119,13 +129,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 4523,
-      "sha256": "6d32189d12c98bdeedf82ac8638f014db96cf800a4f99c5011b5409b07ecd1ff"
+      "bytes": 7821,
+      "sha256": "89cbee4c18729668a9eb8c2c5c9e8cdb86e37059c3538d40ce5b59c474e71e7f"
     },
     {
       "path": "RELEASE_REVIEW.md",
-      "bytes": 678,
-      "sha256": "c87e9221473f8c7b8d5cb40044467ae64b4b79c4503792b139908cc8163ff83d"
+      "bytes": 2419,
+      "sha256": "24085cac1501dc5540fe34d6c1652c4fbd6364b94138504429263c6660f032de"
     },
     {
       "path": "resources/icon.png",
@@ -143,9 +153,14 @@
       "sha256": "945ba28dc44a871ff48e649a2e35c6a4fed8a609ab57fda051e3bc4bbb7b9af1"
     },
     {
+      "path": "scripts/collect-rav1e-sources.py",
+      "bytes": 14454,
+      "sha256": "9aeb486fd4e3a891c867b2c157458d0d335d52354f9a005c86d81195dba12f63"
+    },
+    {
       "path": "scripts/init-tools.mjs",
-      "bytes": 409,
-      "sha256": "c4e845dead2feb7577f13f5b3359e9ba83ba60c992caf5eb6569050ceb549185"
+      "bytes": 421,
+      "sha256": "e1839129586799e11c91e55f56505bb84a2308a5cd3e0a497441a34fc43863af"
     },
     {
       "path": "scripts/install-mac-chrome.mjs",
@@ -163,14 +178,19 @@
       "sha256": "46dc6d31bec595b14a809a41c0b5c005a5946d15731c2620c65bd0e6e098e7a4"
     },
     {
+      "path": "scripts/prepare-browser.mjs",
+      "bytes": 6779,
+      "sha256": "9002c1e93ad9d0a65cf5a591430ef2202d1f4d8d581aad0dd09eb725292e9116"
+    },
+    {
       "path": "scripts/prepare-channel.mjs",
       "bytes": 19646,
       "sha256": "da0848dbdf7d20637cd5c0564c99b8706f5834357436b842844f61a4536cc981"
     },
     {
       "path": "scripts/verify-packaging-resources.mjs",
-      "bytes": 1812,
-      "sha256": "7b9f1d75e9a7d3ac10a8d2dfe6d9be0591f736f52c9b85520ecf6d6394043900"
+      "bytes": 1220,
+      "sha256": "0680161e783725a383d97e8024468a6afb72376b4ca91cdcddab247aad4e112b"
     },
     {
       "path": "SECURITY.md",
@@ -184,8 +204,28 @@
     },
     {
       "path": "src/main/douyin-browser-downloader.ts",
-      "bytes": 10908,
-      "sha256": "3a4e6fcb22dc3e4631f81b5e9d0fe9951f1d3baa0bd0de01373a30b098d1063f"
+      "bytes": 18404,
+      "sha256": "55cb15ff9d1f80952edb3639858a46238c46498a85b97496a15fb16488d7b569"
+    },
+    {
+      "path": "src/main/douyin-browser-paths.ts",
+      "bytes": 2384,
+      "sha256": "2eeea0b92f189b2c40c9f49d4f294c73db357d23186ba52fcabff0b9ecdf4037"
+    },
+    {
+      "path": "src/main/douyin-browser-posts.ts",
+      "bytes": 11262,
+      "sha256": "f2b4a4bfd3f0e2db8cfe7e52ce6b15ca98a5699e1a53351a4e0d0ea9ae397a1a"
+    },
+    {
+      "path": "src/main/douyin-browser-session.ts",
+      "bytes": 5396,
+      "sha256": "9dc966aa81df45fec60ce637222688e586ca1e7dca650e4369412a4948c5319f"
+    },
+    {
+      "path": "src/main/douyin-post-parser.ts",
+      "bytes": 5182,
+      "sha256": "aac127a5a9c7f86ebc57dd01b97e60f77c65411e97e8b4f2ded4397fc10e72eb"
     },
     {
       "path": "src/main/douyin-url-helpers.ts",
@@ -199,8 +239,8 @@
     },
     {
       "path": "src/main/index.ts",
-      "bytes": 5900,
-      "sha256": "11e1a06418218a87caff98785bd2ff083b5c113a94635f6b80e93fee8fd687d4"
+      "bytes": 5846,
+      "sha256": "19f6fff6c7bd90431471a1659e16d34a5d182bd6336f32956ef10a9c0ee968d8"
     },
     {
       "path": "src/main/ipc-handlers/index.ts",
@@ -229,8 +269,8 @@
     },
     {
       "path": "src/main/ipc-handlers/ipc-download.ts",
-      "bytes": 36966,
-      "sha256": "05c2d79bb7acda854efe2ccf52713ad535dc298b4636ca777b399770cd6cdd23"
+      "bytes": 29723,
+      "sha256": "fb260a4830dda52b5f29061978632e3f5dddeaab84cc1b285028806587b1dac2"
     },
     {
       "path": "src/main/ipc-handlers/ipc-file.ts",
@@ -314,8 +354,8 @@
     },
     {
       "path": "src/preload/index.ts",
-      "bytes": 14652,
-      "sha256": "4b0e00358a56cf70d84dc8f6e539892668cc37b8360f4ef1e8e108006cb17c19"
+      "bytes": 14797,
+      "sha256": "b0f1185a4ceb831bfafbb129cd80570b37a1ae622e74fffd99573abe68d7f2be"
     },
     {
       "path": "src/renderer/index.html",
@@ -344,8 +384,8 @@
     },
     {
       "path": "src/renderer/src/api/llm.ts",
-      "bytes": 4885,
-      "sha256": "554f1598e12e80c8c0ab968b5cffb5cd380ce70f0ae91ab561b633a5c163641b"
+      "bytes": 5049,
+      "sha256": "c091123e21f65f8bf2e06c8e34aee895c28a691a61239e6abd059ee18b39d9d2"
     },
     {
       "path": "src/renderer/src/api/template.ts",
@@ -435,7 +475,7 @@
     {
       "path": "src/renderer/src/components/WindowControls.tsx",
       "bytes": 2384,
-      "sha256": "7fed2b77fd69ae3f602a9eb598d7b70a83edc2b90fa43e01b50e11122520ace0"
+      "sha256": "9204c292f33909d30d1ec75aecefc51f5b912fb298c34bb1c6c9ac4ccb9de4c9"
     },
     {
       "path": "src/renderer/src/components/WorksPanel.tsx",
@@ -504,8 +544,8 @@
     },
     {
       "path": "src/renderer/src/pages/Video/VideoScriptCard.tsx",
-      "bytes": 216334,
-      "sha256": "ff7b89fb462f7d61024b92ca7b017a66eb72685b5b1325567389d8a74c9fbd7a"
+      "bytes": 218612,
+      "sha256": "dd7cd35063986beb06ee0c0774a3fba43a039cc641d52c42a48f1d47f106eb50"
     },
     {
       "path": "src/renderer/src/pages/Video/VideoSharedComponents.tsx",
@@ -569,8 +609,8 @@
     },
     {
       "path": "src/renderer/src/types/electron.d.ts",
-      "bytes": 10592,
-      "sha256": "f230ce0a1c7609e73e427ad0d80d9f047301dd5bdb5145bf22fec562384db859"
+      "bytes": 10678,
+      "sha256": "5bcdcf5c6a6887d775e12555b5929ae01cfed3d4e1a0c336b93920165546f1c3"
     },
     {
       "path": "src/renderer/src/types/publish.ts",
@@ -609,8 +649,8 @@
     },
     {
       "path": "src/shared/station-connection.ts",
-      "bytes": 2163,
-      "sha256": "62058d2d5af84e58cefcd0c5d18efc99e6d4531fc6dd419317ed6c8034e0f7d0"
+      "bytes": 2238,
+      "sha256": "d9f8014878a327f485ccac1eed7554eda03ba18345c5c679a48a7935db7d3e16"
     },
     {
       "path": "src/shared/station.ts",
@@ -621,6 +661,31 @@
       "path": "src/types/vite-plugin-obfuscator.d.ts",
       "bytes": 156,
       "sha256": "e557eeb4f3dbb54fe7c3182e1a689157172ebe49756659345fe67f3dc0ae88d7"
+    },
+    {
+      "path": "tests/douyin-browser-posts.test.mjs",
+      "bytes": 12140,
+      "sha256": "b0ae8cd38a0e994666ce5a8baaea92e8623e9f0b842766ea4bdf54e4d45a745e"
+    },
+    {
+      "path": "tests/douyin-browser.test.cjs",
+      "bytes": 26586,
+      "sha256": "b84ac9201a94bdc174c8219fa4a2e1093d7594776d0d80f3953065f509b21931"
+    },
+    {
+      "path": "tests/packaging-resources.test.cjs",
+      "bytes": 1493,
+      "sha256": "a6cba14dea3e6e5aee2597d880bd2d56fbba690a227bdc46119ecfbd00a2a752"
+    },
+    {
+      "path": "tests/topic-cancellation.test.mjs",
+      "bytes": 11379,
+      "sha256": "0b9d582505df63ecaf060a413667405a7e6d5000f35db6f845d106ae5d3abc0f"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 3944,
+      "sha256": "95838585e71dca831fc469758afdd6b4f995c2c02ed30ed532b102a769186fda"
     },
     {
       "path": "tsconfig.json",

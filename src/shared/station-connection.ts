@@ -33,8 +33,8 @@ export async function checkStationConnection(config: StationConfig): Promise<{ o
         : response.status === 404 ? '此服务未提供模型列表接口，请核对 Base URL' : '请稍后重试或检查服务状态'
       return { ok: false, message: `连接检查失败（HTTP ${response.status}），${reason}` }
     }
-    const payload = await response.json().catch(() => null)
-    if (!Array.isArray(payload?.data)) {
+    const payload: unknown = await response.json().catch(() => null)
+    if (!payload || typeof payload !== 'object' || !('data' in payload) || !Array.isArray(payload.data)) {
       return { ok: false, message: '服务响应不是兼容的模型列表，请核对 Base URL' }
     }
     return { ok: true, message: `已连接，返回 ${payload.data.length} 个模型。未提交生成任务；各项能力与可用额度以服务端为准。` }

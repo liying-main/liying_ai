@@ -20,6 +20,7 @@ interface CompletionOptions {
   top_p?: number
   max_tokens?: number
   stream?: boolean
+  signal?: AbortSignal
 }
 
 interface CompletionResponse {
@@ -59,9 +60,12 @@ export const llmService = {
     messages: Message[],
     options: CompletionOptions = {},
   ): Promise<CompletionResponse> {
+    options.signal?.throwIfAborted()
     const { base, key } = await stationEndpoint()
+    options.signal?.throwIfAborted()
     const response = await fetch(`${base}/chat/completions`, {
       method: 'POST',
+      signal: options.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model: STATION_CHAT_MODEL,
@@ -72,6 +76,7 @@ export const llmService = {
     })
 
     const payload = await response.json().catch(() => null)
+    options.signal?.throwIfAborted()
     if (!response.ok) {
       throw new Error(errorMessage(payload, `请求失败：HTTP ${response.status}`))
     }

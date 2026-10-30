@@ -1,6 +1,8 @@
 const { execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
+const { createRequire } = require('module')
+const { verifyResources } = require('./required-resources.cjs')
 
 exports.default = async function afterPack(context) {
   prunePlatformBinaries(context)
@@ -13,7 +15,7 @@ exports.default = async function afterPack(context) {
 
   if (context.electronPlatformName !== 'win32') return
 
-  const exePath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`)
+  const exePath = path.join(context.appOutDir, `${context.packager.platformSpecificBuildOptions.executableName || context.packager.appInfo.productFilename}.exe`)
   let iconPath = path.join(context.packager.projectDir, 'build', 'icon.ico')
   const metaPath = path.join(context.packager.projectDir, '.build-meta.json')
   if (fs.existsSync(metaPath)) {
@@ -28,97 +30,31 @@ exports.default = async function afterPack(context) {
     }
   }
 
-  if (!fs.existsSync(exePath)) {
-    console.warn(`[afterPack] exe not found: ${exePath}`)
-    return
-  }
-  if (!fs.existsSync(iconPath)) {
-    console.warn(`[afterPack] icon not found: ${iconPath}`)
-    console.warn('[afterPack] 请先运行 node scripts/prepare-channel.mjs default 同步 logo 图标')
-    return
-  }
+  if (!fs.existsSync(exePath)) throw new Error(`[afterPack] exe not found: ${exePath}`)
+  if (!fs.existsSync(iconPath)) throw new Error(`[afterPack] icon not found: ${iconPath}`)
 
-  // Find rcedit
-  const cacheBase = path.join(
-    process.env.LOCALAPPDATA || path.join(require('os').homedir(), 'AppData', 'Local'),
-    'electron-builder', 'Cache', 'winCodeSign'
-  )
-  let rceditPath = ''
-  if (fs.existsSync(cacheBase)) {
-    const dirs = fs.readdirSync(cacheBase).filter(d => d.startsWith('winCodeSign-'))
-    for (const dir of dirs) {
-      const candidate = path.join(cacheBase, dir, 'rcedit-x64.exe')
-      if (fs.existsSync(candidate)) {
-        rceditPath = candidate
-        break
-      }
-    }
-  }
-
-  if (!rceditPath) {
-    console.warn('[afterPack] rcedit not found, skipping icon embedding')
-    return
-  }
-
+  // Use electron-builder's verified resource editor and argv handling, including
+  // a fresh build machine where winCodeSign has not been cached yet.
+  const builderRequire = createRequire(require.resolve('electron-builder'))
+  const { executeAppBuilder } = builderRequire('builder-util')
   const productName = context.packager.appInfo.productName || '厉影AI'
-  const version = context.packager.appInfo.version || '1.0.0'
-  const description = context.packager.appInfo.description || ''
+  const version = context.packager.appInfo.version
+  const args = [
+    exePath, '--set-icon', iconPath,
+    '--set-version-string', 'ProductName', productName,
+    '--set-version-string', 'FileDescription', context.packager.appInfo.description || productName,
+    '--set-version-string', 'CompanyName', '厉影AI',
+    '--set-file-version', version, '--set-product-version', `${version}.0`,
+  ]
+  await executeAppBuilder(['rcedit', '--args', JSON.stringify(args)], undefined, {}, 3)
+  console.log(`[afterPack] Windows icon and version resources set: ${productName} ${version}`)
 
-  // Verify icon file
-  const iconStats = fs.statSync(iconPath)
-  console.log(`[afterPack] Icon file: ${iconPath}, size: ${iconStats.size} bytes`)
-
-  // Retry with delay to handle antivirus file locks
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      console.log(`[afterPack] Setting icon (attempt ${attempt}/5)...`)
-      console.log(`[afterPack] rcedit: ${rceditPath}`)
-      console.log(`[afterPack] exe: ${exePath}`)
-      console.log(`[afterPack] icon: ${iconPath}`)
-
-      const result = execSync(
-        `"${rceditPath}" "${exePath}" --set-icon "${iconPath}" --set-version-string ProductName "${productName}" --set-version-string FileDescription "${description}" --set-file-version ${version} --set-product-version ${version}.0`,
-        { stdio: 'inherit', timeout: 30000 }
-      )
-      console.log('[afterPack] Icon set successfully!')
-      console.log('[afterPack] rcedit output:', result?.toString())
-      return
-    } catch (err) {
-      console.warn(`[afterPack] Attempt ${attempt} failed: ${err.message}`)
-      if (attempt < 5) {
-        console.log(`[afterPack] Waiting ${attempt * 3}s before retry...`)
-        await new Promise(r => setTimeout(r, attempt * 3000))
-      }
-    }
-  }
-  console.error('[afterPack] Failed to set icon after 5 attempts')
 }
 
 function verifyRequiredUnpackedBinaries(context) {
   const unpackedRoot = path.join(context.appOutDir, 'resources', 'app.asar.unpacked')
-  const binDir = path.join(unpackedRoot, 'ffmpeg', 'bin')
-  const required = context.electronPlatformName === 'win32'
-    ? ['ffmpeg.exe', 'ffprobe.exe']
-    : context.electronPlatformName === 'darwin'
-      ? [`ffmpeg-${normalizeArch(context.arch)}`, `ffprobe-${normalizeArch(context.arch)}`]
-      : []
-
-  const missing = required.filter((fileName) => {
-    const filePath = path.join(binDir, fileName)
-    if (!fs.existsSync(filePath)) return true
-    const stat = fs.statSync(filePath)
-    return !stat.isFile() || stat.size < 64 * 1024
-  })
-
-  if (missing.length > 0) {
-    throw new Error(
-      `[afterPack] FFmpeg resources missing or invalid: ${missing.join(', ')} in ${binDir}`
-    )
-  }
-
-  if (required.length > 0) {
-    console.log(`[afterPack] FFmpeg resources verified: ${required.join(', ')}`)
-  }
+  const verified = verifyResources(unpackedRoot, context.electronPlatformName, normalizeArch(context.arch))
+  console.log(`[afterPack] FFmpeg and browser resources verified (${verified.length} files)`)
 }
 
 function normalizeArch(arch) {

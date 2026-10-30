@@ -248,26 +248,59 @@ export function VideoScriptCard() {
     llmModels,
   } = useVideoPageStore();
   const fixedLlmModel = (llmModels || [])[0]?.value || llmModel || "DeepSeek";
+  // Each run owns its cancellation state: a late result from an earlier run may
+  // neither trigger another paid request nor overwrite the current dialog.
+  const topicRunRef = useRef(null);
+  const beginTopicRun = () => {
+    topicRunRef.current?.abort();
+    const run = new AbortController();
+    topicRunRef.current = run;
+    setIsTopicAnalyzing(false);
+    setIsTopicScriptsLoading(false);
+    setTopicStage("idle");
+    return run;
+  };
+  const isTopicRunActive = (run) =>
+    topicRunRef.current === run && !run.signal.aborted;
+  useEffect(() => () => topicRunRef.current?.abort(), []);
+  const collectTopicPosts = async (homepage, run) => {
+    run.signal.throwIfAborted();
+    const requestId = crypto.randomUUID();
+    const cancel = () => {
+      void window.api.cancelDouyinUserPosts(requestId).catch(() => {});
+    };
+    run.signal.addEventListener("abort", cancel, { once: true });
+    try {
+      return await window.api.downloadDouyinUserPosts(homepage, requestId);
+    } finally {
+      run.signal.removeEventListener("abort", cancel);
+    }
+  };
   const requestTopicLlmContent = async (
     messages,
     options,
     emptyMessage = "AI 暂未生成内容，请稍后重试",
+    run,
   ) => {
     let lastError = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      run.signal.throwIfAborted();
       try {
         const data = await llmService.completion(fixedLlmModel, messages, {
           ...options,
+          signal: run.signal,
           temperature:
             attempt === 0
               ? options?.temperature
               : Math.max(0.5, Number(options?.temperature ?? 0.7) - 0.1),
         });
+        run.signal.throwIfAborted();
         const responseData = data.data || data;
         const content = responseData?.choices?.[0]?.message?.content?.trim();
         if (content) return content;
         lastError = new Error(emptyMessage);
       } catch (e) {
+        run.signal.throwIfAborted();
         lastError = e;
       }
       if (attempt === 0) {
@@ -452,7 +485,8 @@ export function VideoScriptCard() {
       console.warn("Failed to save IP brain profiles to localStorage", e);
     }
   }, [ipBrainProfiles]);
-  const runTopicStyleAnalysisWithPosts = async (posts) => {
+  const runTopicStyleAnalysisWithPosts = async (posts, run) => {
+    if (!isTopicRunActive(run)) return null;
     if (!posts.length) {
       setTopicError("未获取到可用的视频描述，无法分析选题。");
       setIsTopicAnalyzing(false);
@@ -489,7 +523,9 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
           max_tokens: 1200,
         },
         "风格分析暂未生成有效内容，请稍后重试",
+        run,
       );
+      if (!isTopicRunActive(run)) return null;
       const raw = content.replace(/\uFEFF/g, "").trim();
       let stylePart = raw;
       const styleIndex = raw.indexOf("【风格与定位分析】");
@@ -502,15 +538,19 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
       setTopicError(null);
       return stylePart;
     } catch (e) {
+      if (!isTopicRunActive(run)) return null;
       console.error("学灵感风格分析失败", e);
       setTopicError(e?.message || "风格与定位分析失败，请稍后重试");
       return null;
     } finally {
-      setIsTopicAnalyzing(false);
-      setTopicStage("idle");
+      if (isTopicRunActive(run)) {
+        setIsTopicAnalyzing(false);
+        setTopicStage("idle");
+      }
     }
   };
-  const runTopicIdeasWithPosts = async (posts, reason, styleTextOverride) => {
+  const runTopicIdeasWithPosts = async (posts, reason, styleTextOverride, run) => {
+    if (!isTopicRunActive(run)) return;
     if (!posts.length) {
       setTopicError("未获取到可用的视频描述，无法分析选题。");
       setIsTopicAnalyzing(false);
@@ -555,7 +595,9 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
           max_tokens: 800,
         },
         "推荐选题暂未生成有效内容，请点击换一批重试",
+        run,
       );
+      if (!isTopicRunActive(run)) return;
       const raw = content.replace(/\uFEFF/g, "").trim();
       const ideaLines = raw.split("\n").map((l) => l.trim());
       const collected = [];
@@ -573,11 +615,14 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
       setTopicScripts([]);
       setTopicError(null);
     } catch (e) {
+      if (!isTopicRunActive(run)) return;
       console.error("学灵感推荐选题失败:", e);
       setTopicError(e?.message || "推荐选题生成失败，请稍后重试");
     } finally {
-      setIsTopicAnalyzing(false);
-      setTopicStage("idle");
+      if (isTopicRunActive(run)) {
+        setIsTopicAnalyzing(false);
+        setTopicStage("idle");
+      }
     }
   };
   const handleOpenTopicAnalysis = async () => {
@@ -590,6 +635,7 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
       showToast(homepageCheck.hint || DOUYIN_HOMEPAGE_HINT, "info");
       return;
     }
+    const run = beginTopicRun();
     setShowTopicModal(true);
     setIsTopicAnalyzing(true);
     setTopicStage("style");
@@ -598,11 +644,14 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
     setSelectedTopic(null);
     setTopicScripts([]);
     setTopicError(null);
+    setTopicPostsSnapshot(null);
     try {
-      const result = await window.api.downloadDouyinUserPosts(
+      const result = await collectTopicPosts(
         normalizeDouyinUrlForDownloader(ipBrain.homepage.trim()) ||
           ipBrain.homepage.trim(),
+        run,
       );
+      if (!isTopicRunActive(run)) return;
       if (!result?.success) {
         throw new Error(
           formatDouyinProfileError(
@@ -623,7 +672,8 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
         throw new Error("未获取到该账号的近期视频列表");
       }
       setTopicPostsSnapshot(posts);
-      const styleText = await runTopicStyleAnalysisWithPosts(posts);
+      const styleText = await runTopicStyleAnalysisWithPosts(posts, run);
+      if (!isTopicRunActive(run)) return;
       if (!styleText) {
         setIsTopicAnalyzing(false);
         setTopicStage("idle");
@@ -631,8 +681,9 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
       }
       setIsTopicAnalyzing(true);
       setTopicStage("ideas");
-      await runTopicIdeasWithPosts(posts, "initial", styleText);
+      await runTopicIdeasWithPosts(posts, "initial", styleText, run);
     } catch (e) {
+      if (!isTopicRunActive(run)) return;
       console.error("获取抖音主页视频失败:", e);
       setTopicError(
         formatDouyinProfileError(e?.message, ipBrain?.homepage) ||
@@ -643,6 +694,8 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
     }
   };
   const handleCancelTopicAnalysis = () => {
+    topicRunRef.current?.abort();
+    topicRunRef.current = null;
     setShowTopicModal(false);
     setIsTopicAnalyzing(false);
     setIsTopicScriptsLoading(false);
@@ -654,16 +707,19 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
     handleCancelTopicAnalysis();
   };
   const handleRefreshTopicIdeas = async () => {
+    const run = beginTopicRun();
     if (!topicPostsSnapshot || !topicPostsSnapshot.length) {
       if (ipBrain && ipBrain.homepage.trim()) {
         setIsTopicAnalyzing(true);
         setTopicStage("ideas");
         setTopicError(null);
         try {
-          const result = await window.api.downloadDouyinUserPosts(
+          const result = await collectTopicPosts(
             normalizeDouyinUrlForDownloader(ipBrain.homepage.trim()) ||
               ipBrain.homepage.trim(),
+            run,
           );
+          if (!isTopicRunActive(run)) return;
           if (!result?.success) {
             throw new Error(
               formatDouyinProfileError(
@@ -684,11 +740,13 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
             throw new Error("未获取到该账号的近期视频列表");
           }
           setTopicPostsSnapshot(posts);
-          const styleText = await runTopicStyleAnalysisWithPosts(posts);
+          const styleText = await runTopicStyleAnalysisWithPosts(posts, run);
+          if (!isTopicRunActive(run)) return;
           if (styleText) {
-            await runTopicIdeasWithPosts(posts, "refresh", styleText);
+            await runTopicIdeasWithPosts(posts, "refresh", styleText, run);
           }
         } catch (e) {
+          if (!isTopicRunActive(run)) return;
           console.error("刷新选题分析失败:", e);
           setTopicError(
             formatDouyinProfileError(e?.message, ipBrain?.homepage) ||
@@ -705,10 +763,11 @@ ${TOPIC_ANALYSIS_GUARDRAIL}
     setTopicError(null);
     setSelectedTopic(null);
     setTopicScripts([]);
-    await runTopicIdeasWithPosts(topicPostsSnapshot, "refresh", topicStyleText);
+    await runTopicIdeasWithPosts(topicPostsSnapshot, "refresh", topicStyleText, run);
   };
   const handleGenerateScriptsForTopic = async (topic, reason = "initial") => {
     if (!topic) return;
+    const run = beginTopicRun();
     setSelectedTopic(topic);
     setIsTopicScriptsLoading(true);
     setTopicScripts([]);
@@ -740,7 +799,9 @@ ${topicStyleText || "（风格分析略）"}
           max_tokens: 1600,
         },
         "选题文案暂未生成有效内容，请稍后重试",
+        run,
       );
+      if (!isTopicRunActive(run)) return;
       const raw = content.replace(/\uFEFF/g, "").trim();
       const lines = raw.split("\n").map((l) => l.trim());
       const collected = [];
@@ -755,10 +816,11 @@ ${topicStyleText || "（风格分析略）"}
       }
       setTopicScripts(collected.slice(0, 3));
     } catch (e) {
+      if (!isTopicRunActive(run)) return;
       console.error("生成选题文案失败:", e);
       setTopicError(e?.message || "生成基于选题的文案失败");
     } finally {
-      setIsTopicScriptsLoading(false);
+      if (isTopicRunActive(run)) setIsTopicScriptsLoading(false);
     }
   };
   const isHourCard =

@@ -116,7 +116,8 @@ const api = {
   // Download operations
   douyinDownloaderAvailable: () => ipcRenderer.invoke('douyin-downloader-available'),
   downloadDouyinVideo: (videoUrl: string) => ipcRenderer.invoke('download-douyin-video', videoUrl),
-  downloadDouyinUserPosts: (profileUrl: string) => ipcRenderer.invoke('download-douyin-user-posts', profileUrl),
+  downloadDouyinUserPosts: (profileUrl: string, requestId?: string) => ipcRenderer.invoke('download-douyin-user-posts', profileUrl, requestId),
+  cancelDouyinUserPosts: (requestId: string) => ipcRenderer.invoke('cancel-douyin-user-posts', requestId),
   downloadAudioFromUrl: (audioUrl: string, options?: any) => ipcRenderer.invoke('download-audio-from-url', audioUrl, options),
   downloadVideoFromUrl: (videoUrl: string, fileName: string) => ipcRenderer.invoke('download-video-from-url', videoUrl, fileName),
   onVideoDownloadProgress: (callback: (data: any) => void) => {
