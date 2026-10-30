@@ -33,7 +33,7 @@ jobs:
           def get_api(path):
               with urllib.request.urlopen(urllib.request.Request(api + path, headers=headers), timeout=60) as r:
                   return json.load(r)
-          release = get_api('/repos/' + os.environ['GH_REPO'] + '/releases/tags/v3.2.8')
+          release = get_api('/repos/' + os.environ['GH_REPO'] + '/releases/428895907')
           assert release['draft'], 'Only a draft release may be populated by this workflow'
           meta = get_api('/repos/BtbN/FFmpeg-Builds/actions/artifacts/12896831185')
           expected = 'd445c150c844be2e95e55367495b077d753df3e52add668d23392b2ec7d5901f'
